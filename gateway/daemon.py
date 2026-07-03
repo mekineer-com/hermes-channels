@@ -444,6 +444,10 @@ class ChannelsDaemon:
         bridge_log = self.whatsapp_home / "bridge.log"
         self._bridge_log_fh = open(bridge_log, "a", encoding="utf-8")
         env = os.environ.copy()
+        # Pass the reply prefix from config so the Node bridge can use it
+        # without the user needing to set a separate env var.
+        if self.settings.reply_prefix is not None:
+            env["WHATSAPP_REPLY_PREFIX"] = self.settings.reply_prefix
         env["CHANNELS_IMAGE_CACHE_DIR"] = str(self.whatsapp_home / "image_cache")
         env["CHANNELS_AUDIO_CACHE_DIR"] = str(self.whatsapp_home / "audio_cache")
         env["CHANNELS_DOCUMENT_CACHE_DIR"] = str(self.whatsapp_home / "document_cache")
