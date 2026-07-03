@@ -991,7 +991,7 @@ class ChannelsDaemon:
                 if stop_event.is_set():
                     return
         except asyncio.CancelledError:
-            raise
+            pass  # Normal cancellation when handler completes
 
     async def _outbound_watcher(self) -> None:
         while self._running:
