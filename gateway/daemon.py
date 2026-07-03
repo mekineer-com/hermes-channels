@@ -13,6 +13,7 @@ import os
 import shutil
 import signal
 import subprocess
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -333,6 +334,7 @@ class ChannelsDaemon:
         self._bridge_log_fh = None
         self._web_source_log_fh = None
         self._running = False
+        self._stop_requested = asyncio.Event()
         self._poll_task: asyncio.Task | None = None
         self._drain_task: asyncio.Task | None = None
         self._background_tasks: set[asyncio.Task] = set()
@@ -365,11 +367,13 @@ class ChannelsDaemon:
             raise RuntimeError("failed to start WhatsApp bridge")
         self._drain_task = asyncio.create_task(self._outbound_watcher())
 
+    def request_stop(self) -> None:
+        self._stop_requested.set()
+
     async def run_forever(self) -> None:
         await self.start()
         try:
-            while self._running:
-                await asyncio.sleep(3600)
+            await self._stop_requested.wait()
         finally:
             await self.disconnect()
 
@@ -1851,7 +1855,23 @@ def _kill_port_process(port: int) -> None:
 
 async def amain() -> None:
     logging.basicConfig(level=os.environ.get("CHANNELS_LOG_LEVEL", "INFO"))
-    await ChannelsDaemon().run_forever()
+    daemon = ChannelsDaemon()
+
+    def shutdown_signal_handler(sig: int) -> None:
+        logger.info("Received %s — initiating shutdown", signal.Signals(sig).name)
+        daemon.request_stop()
+
+    loop = asyncio.get_running_loop()
+    if threading.current_thread() is threading.main_thread():
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            try:
+                loop.add_signal_handler(sig, shutdown_signal_handler, sig)  # windows-footgun: ok — wrapped in try/except NotImplementedError for Windows
+            except NotImplementedError:
+                pass
+    else:
+        logger.info("Skipping signal handlers (not running in main thread).")
+
+    await daemon.run_forever()
 
 
 def main() -> None:
