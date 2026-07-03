@@ -28,3 +28,19 @@ def test_state_db_dedup_response_fallback_and_active_since(tmp_path):
         conn.execute("INSERT INTO souls(soul_id, active_since) VALUES('soul', 1234.5)")
     assert db.get_soul_active_since("soul") == 1234.5
     db.close()
+
+
+def test_append_message_duplicate_source_key_returns_existing_id(tmp_path):
+    db = ChannelsStateDB(tmp_path / "state.db")
+    db.create_session("s1", "whatsapp", user_id="u1")
+    first_id = db.append_message(
+        "s1", "user", "hello", source_chat_id="chat@lid", source_message_id="m1", timestamp=100
+    )
+    second_id = db.append_message(
+        "s1", "user", "hello again", source_chat_id="chat@lid", source_message_id="m1", timestamp=200
+    )
+    assert second_id == first_id
+    rows = db.get_messages("s1")
+    assert len(rows) == 1
+    assert rows[0]["content"] == "hello"
+    db.close()
