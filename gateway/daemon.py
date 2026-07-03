@@ -1575,6 +1575,8 @@ class ChannelsDaemon:
         except OSError:
             pass
         env = os.environ.copy()
+        if self.settings.web_source_chromium_path:
+            env["PUPPETEER_EXECUTABLE_PATH"] = self.settings.web_source_chromium_path
         self._web_source_process = subprocess.Popen(
             self._web_source_command(),
             cwd=str(web_source_dir),

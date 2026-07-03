@@ -32,6 +32,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "text_batch_split_delay_seconds": 10.0,
     "web_source_enabled": True,
     "web_source_headful": False,
+    "web_source_chromium_path": "",
     "session_reset_mode": "both",
     "session_reset_at_hour": 4,
     "session_reset_idle_minutes": 1440,
@@ -52,6 +53,7 @@ class DaemonSettings:
     text_batch_split_delay_seconds: float
     web_source_enabled: bool
     web_source_headful: bool
+    web_source_chromium_path: str = ""
     # Session reset policy (hermes SessionResetPolicy defaults):
     # "daily", "idle", "both" (whichever triggers first), or "none".
     session_reset_mode: str = "both"
@@ -114,6 +116,7 @@ def load_config() -> DaemonSettings:
         text_batch_split_delay_seconds=_coerce_float(data["text_batch_split_delay_seconds"], DEFAULT_CONFIG["text_batch_split_delay_seconds"], "text_batch_split_delay_seconds"),
         web_source_enabled=_coerce_bool(data["web_source_enabled"], True),
         web_source_headful=_coerce_bool(data["web_source_headful"], False),
+        web_source_chromium_path=str(data["web_source_chromium_path"] or "").strip(),
         session_reset_mode=str(data["session_reset_mode"]).strip().lower(),
         session_reset_at_hour=_coerce_int(data["session_reset_at_hour"], DEFAULT_CONFIG["session_reset_at_hour"], "session_reset_at_hour"),
         session_reset_idle_minutes=_coerce_int(data["session_reset_idle_minutes"], DEFAULT_CONFIG["session_reset_idle_minutes"], "session_reset_idle_minutes"),
