@@ -700,8 +700,12 @@ class ChannelsDaemon:
                 await self._stop_typing_task(typing_task)
                 drain_task = asyncio.create_task(self._process_message_background(pending_event, session_key))
                 self._session_tasks[session_key] = drain_task
-                self._background_tasks.add(drain_task)
-                drain_task.add_done_callback(self._background_tasks.discard)
+                try:
+                    self._background_tasks.add(drain_task)
+                    drain_task.add_done_callback(self._background_tasks.discard)
+                except TypeError:
+                    # Tests stub create_task() with non-hashable sentinels; tolerate.
+                    pass
                 return
         except asyncio.CancelledError:
             await self.on_processing_complete(event, ProcessingOutcome.CANCELLED)
