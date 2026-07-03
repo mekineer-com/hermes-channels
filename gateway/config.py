@@ -33,6 +33,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "web_source_enabled": True,
     "web_source_headful": False,
     "web_source_chromium_path": "",
+    "web_source_disable_service_workers": False,
+    "web_source_resource_block": True,
     "reply_prefix": None,
     "session_reset_mode": "both",
     "session_reset_at_hour": 4,
@@ -55,6 +57,8 @@ class DaemonSettings:
     web_source_enabled: bool
     web_source_headful: bool
     web_source_chromium_path: str = ""
+    web_source_disable_service_workers: bool = False
+    web_source_resource_block: bool = True
     # None = let the bridge use its built-in default prefix.
     reply_prefix: str | None = None
     # Session reset policy (hermes SessionResetPolicy defaults):
@@ -120,6 +124,8 @@ def load_config() -> DaemonSettings:
         web_source_enabled=_coerce_bool(data["web_source_enabled"], True),
         web_source_headful=_coerce_bool(data["web_source_headful"], False),
         web_source_chromium_path=str(data["web_source_chromium_path"] or "").strip(),
+        web_source_disable_service_workers=_coerce_bool(data["web_source_disable_service_workers"], False),
+        web_source_resource_block=_coerce_bool(data["web_source_resource_block"], True),
         reply_prefix=None if data["reply_prefix"] is None else str(data["reply_prefix"]),
         session_reset_mode=str(data["session_reset_mode"]).strip().lower(),
         session_reset_at_hour=_coerce_int(data["session_reset_at_hour"], DEFAULT_CONFIG["session_reset_at_hour"], "session_reset_at_hour"),

@@ -1543,6 +1543,10 @@ class ChannelsDaemon:
         if active_since is not None:
             command.extend(["--backfill-since", str(int(active_since))])
             command.extend(["--active-since", str(int(active_since))])
+        if self.settings.web_source_disable_service_workers:
+            command.append("--disable-service-workers")
+        if not self.settings.web_source_resource_block:
+            command.append("--no-resource-block")
         if self.settings.web_source_headful or self._web_source_pairing_headful:
             command.append("--headful")
         return command
