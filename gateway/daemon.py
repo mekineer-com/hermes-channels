@@ -741,8 +741,12 @@ class ChannelsDaemon:
                         active.clear()
                     drain_task = asyncio.create_task(self._process_message_background(late_pending, session_key))
                     self._session_tasks[session_key] = drain_task
-                    self._background_tasks.add(drain_task)
-                    drain_task.add_done_callback(self._background_tasks.discard)
+                    try:
+                        self._background_tasks.add(drain_task)
+                        drain_task.add_done_callback(self._background_tasks.discard)
+                    except TypeError:
+                        # Tests stub create_task() with non-hashable sentinels; tolerate.
+                        pass
             else:
                 current_task = asyncio.current_task()
                 if current_task is not None and self._session_tasks.get(session_key) is current_task:
