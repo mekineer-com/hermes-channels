@@ -19,7 +19,7 @@ import urllib.parse
 import urllib.request
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from enum import Enum
 from pathlib import Path
 from typing import Any, Optional
@@ -141,12 +141,18 @@ class SendResult:
 class SessionEntry:
     session_id: str
     origin: SessionSource
+    parent_session_id: str | None = None
+    updated_at: datetime = field(default_factory=datetime.now)
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        out = {
             "session_id": self.session_id,
             "origin": self.origin.to_dict(),
+            "updated_at": self.updated_at.isoformat(),
         }
+        if self.parent_session_id:
+            out["parent_session_id"] = self.parent_session_id
+        return out
 
 
 def build_session_key(
@@ -967,12 +973,19 @@ class ChannelsDaemon:
                 if stop_event is None:
                     await asyncio.sleep(interval)
                     continue
-                deadline = asyncio.get_running_loop().time() + interval
+                loop = asyncio.get_running_loop()
+                deadline = loop.time() + interval
                 while not stop_event.is_set():
-                    remaining = deadline - asyncio.get_running_loop().time()
+                    remaining = deadline - loop.time()
                     if remaining <= 0:
                         break
-                    await asyncio.sleep(min(0.1, remaining))
+                    # Poll instead of wait_for(stop_event.wait()).  Cancelling
+                    # wait_for while it owns the inner Event.wait task can leave
+                    # shutdown paths stuck awaiting the typing task on Python
+                    # 3.11/pytest-asyncio; sleep cancellation is immediate.
+                    await asyncio.sleep(min(0.25, remaining))
+                if stop_event.is_set():
+                    return
         except asyncio.CancelledError:
             raise
 
@@ -1083,6 +1096,37 @@ class ChannelsDaemon:
         self._ensure_sessions_loaded()
         key = build_session_key(source)
         entry = self._session_entries.get(key)
+        db_end_session_id = None
+        if entry:
+            reset_reason = self._should_reset(entry)
+            if not reset_reason:
+                entry.updated_at = datetime.now()
+                self._save_sessions()
+                return entry
+            # Session is being auto-reset; the server chains history across
+            # rotations via parent_session_id.
+            logger.info("Session auto-reset (%s) for %s", reset_reason, key)
+            db_end_session_id = entry.session_id
+        session_id = f"session_{uuid.uuid4().hex}"
+        entry = SessionEntry(session_id=session_id, origin=source, parent_session_id=db_end_session_id)
+        self._session_entries[key] = entry
+        self._save_sessions()
+        if db_end_session_id:
+            self._db.end_session(db_end_session_id, "session_reset")
+        self._db.create_session(
+            session_id,
+            source.platform,
+            user_id=source.user_id,
+            parent_session_id=db_end_session_id,
+        )
+        write_channel_directory()
+        return entry
+
+    def get_or_create_history_session(self, source: SessionSource) -> SessionEntry:
+        """Resolve a session for persisted history without touching activity state."""
+        self._ensure_sessions_loaded()
+        key = build_session_key(source)
+        entry = self._session_entries.get(key)
         if entry:
             return entry
         session_id = f"session_{uuid.uuid4().hex}"
@@ -1092,6 +1136,38 @@ class ChannelsDaemon:
         self._db.create_session(session_id, source.platform, user_id=source.user_id)
         write_channel_directory()
         return entry
+
+    def _should_reset(self, entry: SessionEntry) -> Optional[str]:
+        """Check if a session should be reset based on policy.
+
+        Returns the reset reason ("idle" or "daily") if a reset is needed,
+        or None if the session is still valid.
+        """
+        mode = self.settings.session_reset_mode
+        if mode == "none":
+            return None
+
+        now = datetime.now()
+
+        if mode in {"idle", "both"}:
+            idle_deadline = entry.updated_at + timedelta(minutes=self.settings.session_reset_idle_minutes)
+            if now > idle_deadline:
+                return "idle"
+
+        if mode in {"daily", "both"}:
+            today_reset = now.replace(
+                hour=self.settings.session_reset_at_hour,
+                minute=0,
+                second=0,
+                microsecond=0,
+            )
+            if now.hour < self.settings.session_reset_at_hour:
+                today_reset -= timedelta(days=1)
+
+            if entry.updated_at < today_reset:
+                return "daily"
+
+        return None
 
     def _ensure_sessions_loaded(self) -> None:
         if self._sessions_loaded:
@@ -1107,9 +1183,15 @@ class ChannelsDaemon:
                     try:
                         origin_data = entry_data["origin"]
                         origin = SessionSource(**origin_data)
+                        try:
+                            updated_at = datetime.fromisoformat(entry_data["updated_at"])
+                        except (KeyError, TypeError, ValueError):
+                            updated_at = datetime.now()
                         self._session_entries[key] = SessionEntry(
                             session_id=entry_data["session_id"],
                             origin=origin,
+                            parent_session_id=entry_data.get("parent_session_id"),
+                            updated_at=updated_at,
                         )
                     except (KeyError, TypeError):
                         continue
@@ -1145,7 +1227,7 @@ class ChannelsDaemon:
         else:
             sender_id = str(raw.get("senderId") or "").strip() or None
             sender_name = str(raw.get("senderName") or "").strip() or None
-        session_entry = self.get_or_create_session(source)
+        session_entry = self.get_or_create_history_session(source)
         self._db.append_message(
             session_id=session_entry.session_id,
             role=role,
@@ -1250,7 +1332,7 @@ class ChannelsDaemon:
         chat_id = str(getattr(source, "chat_id", "") or "").strip()
         if not source or source.platform != "whatsapp" or not message_id or not chat_id:
             return
-        session_entry = self.get_or_create_session(source)
+        session_entry = self.get_or_create_history_session(source)
         self._db.stamp_latest_assistant_source_key(
             session_id=session_entry.session_id,
             source_chat_id=chat_id,
@@ -1258,12 +1340,28 @@ class ChannelsDaemon:
             content=content,
         )
 
+    def _session_task_is_stale(self, session_key: str) -> bool:
+        """Return True if the owner task for ``session_key`` is done/cancelled.
+
+        A lock is "stale" when the daemon still has ``_active_sessions[key]``
+        AND a known owner task in ``_session_tasks`` that has already exited.
+        When there is no owner task at all, don't treat that as stale.
+        """
+        task = self._session_tasks.get(session_key)
+        if task is None:
+            return False
+        done = getattr(task, "done", None)
+        return bool(done and done())
+
     def _heal_stale_session_lock(self, session_key: str) -> bool:
+        """Clear a stale session lock if the owner task is already gone.
+
+        Returns True if a stale lock was healed.  Returns False if there is
+        no lock, or the owner task is still alive (the normal busy case).
+        """
         if session_key not in self._active_sessions:
             return False
-        task = self._session_tasks.get(session_key)
-        done = bool(getattr(task, "done", None) and task.done()) if task else False
-        if not done:
+        if not self._session_task_is_stale(session_key):
             return False
         logger.warning("[whatsapp] Healing stale session lock for %s (owner task is done/absent)", session_key)
         self._active_sessions.pop(session_key, None)
