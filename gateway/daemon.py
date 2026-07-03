@@ -141,16 +141,12 @@ class SendResult:
 class SessionEntry:
     session_id: str
     origin: SessionSource
-    parent_session_id: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        out = {
+        return {
             "session_id": self.session_id,
             "origin": self.origin.to_dict(),
         }
-        if self.parent_session_id:
-            out["parent_session_id"] = self.parent_session_id
-        return out
 
 
 def build_session_key(
@@ -262,6 +258,19 @@ def merge_pending_message_event(
                 existing.text = f"{existing.text}\n{event.text}" if existing.text else event.text
             return
     pending_messages[session_key] = event
+
+
+def _is_duplicate_whatsapp_followup(current_event: MessageEvent, queued_event: MessageEvent) -> bool:
+    """True when a queued WhatsApp follow-up is a replay of the current turn."""
+    if current_event.source is None or queued_event.source is None:
+        return False
+    if current_event.source.platform != "whatsapp":
+        return False
+    if queued_event.source.platform != "whatsapp":
+        return False
+    current_id = str(current_event.message_id or "").strip()
+    queued_id = str(queued_event.message_id or "").strip()
+    return bool(current_id and queued_id and current_id == queued_id)
 
 
 def _file_content_hash(path: Path) -> str:
@@ -704,14 +713,30 @@ class ChannelsDaemon:
         finally:
             await self._stop_typing_task(typing_task)
             late_pending = self._pending_messages.pop(session_key, None)
+            if late_pending is not None and _is_duplicate_whatsapp_followup(event, late_pending):
+                logger.info(
+                    "[whatsapp] Dropping duplicate WhatsApp late-arrival replay (message_id=%s) for %s",
+                    str(late_pending.message_id or ""),
+                    session_key,
+                )
+                late_pending = None
             if late_pending is not None:
-                active = self._active_sessions.get(session_key)
-                if active is not None:
-                    active.clear()
-                drain_task = asyncio.create_task(self._process_message_background(late_pending, session_key))
-                self._session_tasks[session_key] = drain_task
-                self._background_tasks.add(drain_task)
-                drain_task.add_done_callback(self._background_tasks.discard)
+                current_task = asyncio.current_task()
+                existing_task = self._session_tasks.get(session_key)
+                if existing_task is not None and existing_task is not current_task:
+                    # The in-band drain (or an earlier late-arrival drain) already
+                    # spawned a follow-up task that owns this session. Re-queue the
+                    # late-arrival event so that task picks it up instead of spawning
+                    # a second concurrent _process_message_background for the same key.
+                    self._pending_messages[session_key] = late_pending
+                else:
+                    active = self._active_sessions.get(session_key)
+                    if active is not None:
+                        active.clear()
+                    drain_task = asyncio.create_task(self._process_message_background(late_pending, session_key))
+                    self._session_tasks[session_key] = drain_task
+                    self._background_tasks.add(drain_task)
+                    drain_task.add_done_callback(self._background_tasks.discard)
             else:
                 current_task = asyncio.current_task()
                 if current_task is not None and self._session_tasks.get(session_key) is current_task:
@@ -760,7 +785,7 @@ class ChannelsDaemon:
             logger.info("Soul listen_only for %s (memu.json policy)", conversation_id)
             allow_public_response = False
 
-        history = self._db.get_messages(entry.session_id)
+        history = [] if source.platform == "whatsapp" else self._db.get_messages(entry.session_id)
         try:
             turn_out = await asyncio.to_thread(
                 self._memu_client.memu_turn,
@@ -794,7 +819,7 @@ class ChannelsDaemon:
                 return ""
             if response_target == "private" and source.platform == "whatsapp" and response_text:
                 self._route_whatsapp_notice_to_self_dm(response_text, conversation_id, "PRIVATE reply")
-                self._db.append_message(entry.session_id, "assistant", response_text)
+                self._db.append_message(entry.session_id, "assistant", "")
                 return ""
             if not response_text:
                 raise MemuClientError("memU turn returned empty response", response_body=json.dumps(turn_out, default=str))
@@ -806,12 +831,14 @@ class ChannelsDaemon:
                 if getattr(exc, "status_code", None) is None
                 else f"memU turn failed (HTTP {exc.status_code}): {exc}"
             )
-            self._route_whatsapp_notice_to_self_dm(error_msg, conversation_id, "memU failure notice")
+            if source.platform == "whatsapp":
+                self._route_whatsapp_notice_to_self_dm(error_msg, conversation_id, "memU failure notice")
             self._persist_exception_turn(entry, source, raw, event.text, error_msg)
             return ""
         except Exception as exc:
             error_msg = f"memU turn failed: {type(exc).__name__}: {exc}"
-            self._route_whatsapp_notice_to_self_dm(error_msg, conversation_id, "memU failure notice")
+            if source.platform == "whatsapp":
+                self._route_whatsapp_notice_to_self_dm(error_msg, conversation_id, "memU failure notice")
             self._persist_exception_turn(entry, source, raw, event.text, error_msg)
             return ""
 
@@ -1001,19 +1028,29 @@ class ChannelsDaemon:
 
         try:
             if target == "private":
-                self_dm = await asyncio.to_thread(read_self_dm_jid)
-                if not self_dm:
-                    await _mark("failed", error="self-DM delivery failed")
+                if media_path:
+                    self_dm = await asyncio.to_thread(read_self_dm_jid)
+                    if not self_dm:
+                        await _mark("failed", error="self-DM delivery failed")
+                        return
+                    result = await self.send_document(self_dm, media_path, text or None)
+                    if isinstance(result, SendResult) and not result.success:
+                        await _mark("failed", error=result.error or "adapter send failed")
+                        return
+                    self._record_outbound_sent(out_id)
+                    await _mark("sent", provider_message_id=getattr(result, "message_id", None))
                     return
-                result = await self.send_document(self_dm, media_path, text or None) if media_path else await asyncio.to_thread(send_text, self_dm, text)
-                if isinstance(result, SendResult) and not result.success:
-                    await _mark("failed", error=result.error or "adapter send failed")
-                    return
-                if result is False:
+                ok = await asyncio.to_thread(
+                    self._route_whatsapp_notice_to_self_dm,
+                    text,
+                    origin,
+                    "free-turn PRIVATE reply",
+                )
+                if not ok:
                     await _mark("failed", error="self-DM delivery failed")
                     return
                 self._record_outbound_sent(out_id)
-                await _mark("sent", provider_message_id=getattr(result, "message_id", None))
+                await _mark("sent")
                 return
             if target != "respond":
                 await _mark("failed", error=f"unsupported target {target!r}")
@@ -1056,28 +1093,6 @@ class ChannelsDaemon:
         write_channel_directory()
         return entry
 
-    def rotate_session(self, source: SessionSource) -> SessionEntry:
-        self._ensure_sessions_loaded()
-        key = build_session_key(source)
-        old_entry = self._session_entries.get(key)
-        old_id = old_entry.session_id if old_entry else None
-        if old_id:
-            self._db.end_session(old_id, "session_reset")
-        new_entry = SessionEntry(
-            session_id=f"session_{uuid.uuid4().hex}",
-            origin=source,
-            parent_session_id=old_id,
-        )
-        self._session_entries[key] = new_entry
-        self._save_sessions()
-        self._db.create_session(
-            new_entry.session_id,
-            source.platform,
-            user_id=source.user_id,
-            parent_session_id=old_id,
-        )
-        return new_entry
-
     def _ensure_sessions_loaded(self) -> None:
         if self._sessions_loaded:
             return
@@ -1095,7 +1110,6 @@ class ChannelsDaemon:
                         self._session_entries[key] = SessionEntry(
                             session_id=entry_data["session_id"],
                             origin=origin,
-                            parent_session_id=entry_data.get("parent_session_id"),
                         )
                     except (KeyError, TypeError):
                         continue
@@ -1255,7 +1269,15 @@ class ChannelsDaemon:
         self._active_sessions.pop(session_key, None)
         self._pending_messages.pop(session_key, None)
         self._session_tasks.pop(session_key, None)
+        self._discard_text_debounce(session_key)
         return True
+
+    def _discard_text_debounce(self, session_key: str) -> None:
+        """Cancel and drop pending text debounce state for control commands."""
+        task = self._pending_text_batch_tasks.pop(session_key, None)
+        if task is not None and not task.done():
+            task.cancel()
+        self._pending_text_batches.pop(session_key, None)
 
     def _release_session_guard(self, session_key: str, *, guard: asyncio.Event | None = None) -> None:
         current_guard = self._active_sessions.get(session_key)
@@ -1523,8 +1545,8 @@ class ChannelsDaemon:
         while self._running:
             if (self._session_path / "creds.json").exists():
                 logger.info("[whatsapp] WhatsApp pairing detected; starting reply bridge")
-                await self.connect()
-                return
+                if await self.connect():
+                    return
             self._check_web_source_exit()
             await asyncio.sleep(2)
 

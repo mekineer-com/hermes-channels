@@ -84,6 +84,10 @@ CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, timestam
 CREATE INDEX IF NOT EXISTS idx_messages_session_active
     ON messages(session_id, active, timestamp);
 
+CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_source_key
+    ON messages(source_chat_id, source_message_id)
+    WHERE source_chat_id IS NOT NULL AND source_message_id IS NOT NULL;
+
 CREATE TABLE IF NOT EXISTS processed_source_keys (
     source_chat_id TEXT NOT NULL,
     source_message_id TEXT NOT NULL,

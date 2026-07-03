@@ -9,11 +9,14 @@ CHANNELS_DRAIN_INTERVAL_SECONDS, CHANNELS_TIMEOUT_SECONDS.
 from __future__ import annotations
 
 import json
+import logging
 import os
 from dataclasses import dataclass
 from typing import Any
 
 from gateway.home import channels_home
+
+logger = logging.getLogger(__name__)
 
 
 DEFAULT_CONFIG: dict[str, Any] = {
@@ -48,6 +51,24 @@ class DaemonSettings:
     web_source_headful: bool
 
 
+def _coerce_float(value: Any, default: float, key: str) -> float:
+    """Coerce numeric config values, falling back on malformed input."""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        logger.warning("Ignoring invalid %s=%r (expected a number); using default %r", key, value, default)
+        return default
+
+
+def _coerce_int(value: Any, default: int, key: str) -> int:
+    """Coerce integer config values, falling back on malformed input."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        logger.warning("Ignoring invalid %s=%r (expected an integer); using default %r", key, value, default)
+        return default
+
+
 def load_config() -> DaemonSettings:
     data = dict(DEFAULT_CONFIG)
     path = channels_home() / "config.json"
@@ -76,13 +97,13 @@ def load_config() -> DaemonSettings:
         memu_base_url=str(data["memu_base_url"]).rstrip("/"),
         soul_id=str(data["soul_id"]),
         user_id=str(data["user_id"]),
-        bridge_port=int(data["bridge_port"]),
-        timeout_seconds=float(data["timeout_seconds"]),
-        poll_interval_seconds=float(data["poll_interval_seconds"]),
-        drain_interval_seconds=float(data["drain_interval_seconds"]),
-        max_message_age_seconds=int(data["max_message_age_seconds"]),
-        text_batch_delay_seconds=float(data["text_batch_delay_seconds"]),
-        text_batch_split_delay_seconds=float(data["text_batch_split_delay_seconds"]),
+        bridge_port=_coerce_int(data["bridge_port"], DEFAULT_CONFIG["bridge_port"], "bridge_port"),
+        timeout_seconds=_coerce_float(data["timeout_seconds"], DEFAULT_CONFIG["timeout_seconds"], "timeout_seconds"),
+        poll_interval_seconds=_coerce_float(data["poll_interval_seconds"], DEFAULT_CONFIG["poll_interval_seconds"], "poll_interval_seconds"),
+        drain_interval_seconds=_coerce_float(data["drain_interval_seconds"], DEFAULT_CONFIG["drain_interval_seconds"], "drain_interval_seconds"),
+        max_message_age_seconds=_coerce_int(data["max_message_age_seconds"], DEFAULT_CONFIG["max_message_age_seconds"], "max_message_age_seconds"),
+        text_batch_delay_seconds=_coerce_float(data["text_batch_delay_seconds"], DEFAULT_CONFIG["text_batch_delay_seconds"], "text_batch_delay_seconds"),
+        text_batch_split_delay_seconds=_coerce_float(data["text_batch_split_delay_seconds"], DEFAULT_CONFIG["text_batch_split_delay_seconds"], "text_batch_split_delay_seconds"),
         web_source_enabled=_coerce_bool(data["web_source_enabled"], True),
         web_source_headful=_coerce_bool(data["web_source_headful"], False),
     )
