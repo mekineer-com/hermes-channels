@@ -243,6 +243,48 @@ class ChannelsStateDB:
 
         self._execute_write(_do)
 
+    def delete_message_by_source_key(
+        self,
+        *,
+        source_chat_id: str,
+        source_message_id: str,
+    ) -> int:
+        chat_key = str(source_chat_id or "").strip()
+        message_key = str(source_message_id or "").strip()
+        if not chat_key or not message_key:
+            return 0
+
+        def _do(conn):
+            rows = conn.execute(
+                "SELECT session_id FROM messages WHERE source_chat_id = ? AND source_message_id = ?",
+                (chat_key, message_key),
+            ).fetchall()
+            if not rows:
+                return 0
+            session_counts: dict[str, int] = {}
+            for row in rows:
+                sid = str(row[0] or "").strip()
+                if sid:
+                    session_counts[sid] = session_counts.get(sid, 0) + 1
+
+            cursor = conn.execute(
+                "DELETE FROM messages WHERE source_chat_id = ? AND source_message_id = ?",
+                (chat_key, message_key),
+            )
+            deleted = int(cursor.rowcount or 0)
+            conn.execute(
+                "DELETE FROM processed_source_keys WHERE source_chat_id = ? AND source_message_id = ?",
+                (chat_key, message_key),
+            )
+            for sid, count in session_counts.items():
+                conn.execute(
+                    "UPDATE sessions SET message_count = MAX(message_count - ?, 0) WHERE id = ?",
+                    (count, sid),
+                )
+            return deleted
+
+        return int(self._execute_write(_do))
+
     def message_source_key_is_processed(
         self,
         *,

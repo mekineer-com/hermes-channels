@@ -10,6 +10,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -41,6 +42,31 @@ from gateway.whatsapp_seam import (
 from gateway.whatsapp_wal import WhatsAppGatewayWal
 
 logger = logging.getLogger(__name__)
+
+SUPPORTED_DOCUMENT_TYPES = {
+    ".pdf": "application/pdf",
+    ".md": "text/markdown",
+    ".txt": "text/plain",
+    ".csv": "text/csv",
+    ".log": "text/plain",
+    ".json": "application/json",
+    ".xml": "application/xml",
+    ".yaml": "application/yaml",
+    ".yml": "application/yaml",
+    ".toml": "application/toml",
+    ".ini": "text/plain",
+    ".cfg": "text/plain",
+    ".zip": "application/zip",
+    ".doc": "application/msword",
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ".xls": "application/vnd.ms-excel",
+    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ".ppt": "application/vnd.ms-powerpoint",
+    ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    ".ts": "text/plain",
+    ".py": "text/plain",
+    ".sh": "text/plain",
+}
 _IS_WINDOWS = os.name == "nt"
 
 HERMES_HUNK_RANGES = {
@@ -144,6 +170,9 @@ class SessionEntry:
     origin: SessionSource
     parent_session_id: str | None = None
     updated_at: datetime = field(default_factory=datetime.now)
+    was_auto_reset: bool = False
+    auto_reset_reason: Optional[str] = None  # "idle" or "daily"
+    reset_had_activity: bool = False  # whether the expired session had any messages
 
     def to_dict(self) -> dict[str, Any]:
         out = {
@@ -153,6 +182,9 @@ class SessionEntry:
         }
         if self.parent_session_id:
             out["parent_session_id"] = self.parent_session_id
+        out["was_auto_reset"] = self.was_auto_reset
+        out["auto_reset_reason"] = self.auto_reset_reason
+        out["reset_had_activity"] = self.reset_had_activity
         return out
 
 
@@ -612,6 +644,10 @@ class ChannelsDaemon:
         wal_seq = raw.get("wal_seq")
         if wal_seq is None:
             raise ValueError("WhatsApp WAL invariant break: missing wal_seq on persist-only event")
+        if delivery_mode == "revoke":
+            self._apply_whatsapp_revoke(event.source, raw)
+            self._gateway_wal.mark_processed(wal_seq)
+            return
         self._persist_history_event(event)
         self._gateway_wal.mark_processed(wal_seq)
 
@@ -777,6 +813,31 @@ class ChannelsDaemon:
     async def _handle_turn(self, event: MessageEvent, session_key: str) -> str:
         source = event.source
         entry = self.get_or_create_session(source)
+        # Send a user-facing notification explaining the reset, unless:
+        # - notifications are disabled in config
+        # - the expired session had no activity (nothing was cleared)
+        if entry.was_auto_reset:
+            reset_reason = entry.auto_reset_reason or "idle"
+            try:
+                should_notify = self.settings.session_reset_notify and entry.reset_had_activity
+                if should_notify:
+                    if reset_reason == "daily":
+                        reason_text = f"daily schedule at {self.settings.session_reset_at_hour}:00"
+                    else:
+                        hours = self.settings.session_reset_idle_minutes // 60
+                        mins = self.settings.session_reset_idle_minutes % 60
+                        duration = f"{hours}h" if not mins else f"{hours}h {mins}m" if hours else f"{mins}m"
+                        reason_text = f"inactive for {duration}"
+                    notice = (
+                        f"◐ Session automatically reset ({reason_text}). "
+                        f"Conversation history cleared."
+                    )
+                    await self.send(source.chat_id, notice)
+            except Exception as e:
+                logger.debug("Auto-reset notification failed (non-fatal): %s", e)
+            entry.was_auto_reset = False
+            entry.auto_reset_reason = None
+            self._save_sessions()
         raw = event.raw_message if isinstance(event.raw_message, dict) else {}
         source_chat_id = str(raw.get("chatId") or "").strip() or None
         source_message_id = str(raw.get("messageId") or "").strip() or None
@@ -910,6 +971,36 @@ class ChannelsDaemon:
 
     async def _build_message_event(self, data: dict[str, Any]) -> Optional[MessageEvent]:
         delivery_mode = self._bridge_delivery_mode(data)
+        if delivery_mode == "revoke":
+            chat_id = str(data.get("chatId") or "").strip()
+            if not chat_id:
+                return None
+            is_group = bool(data.get("isGroup")) or chat_id.endswith("@g.us")
+            chat_type = "group" if is_group else "dm"
+            chat_name = self._resolve_event_chat_name(data, is_group=is_group)
+            source_user_id = str(data.get("senderId") or "").strip()
+            source_user_name = str(data.get("senderName") or "").strip()
+            if not is_group:
+                source_user_id = chat_id or source_user_id
+                source_user_name = chat_name or source_user_name
+            raw_message = dict(data)
+            raw_message["chatName"] = chat_name
+            return MessageEvent(
+                text="",
+                message_type=MessageType.TEXT,
+                source=SessionSource(
+                    platform="whatsapp",
+                    chat_id=chat_id,
+                    chat_name=chat_name,
+                    chat_type=chat_type,
+                    user_id=source_user_id,
+                    user_name=source_user_name,
+                    message_id=str(data.get("messageId") or "").strip() or None,
+                ),
+                raw_message=raw_message,
+                message_id=str(data.get("messageId") or "").strip() or None,
+                internal=True,
+            )
         persist_only = delivery_mode != "live"
         if persist_only and not self._should_persist_bridge_event(data):
             return None
@@ -943,7 +1034,80 @@ class ChannelsDaemon:
             user_name=source_user_name,
             message_id=str(data.get("messageId") or "").strip() or None,
         )
+        # The bridge downloads media itself and always emits local cache
+        # paths in mediaUrls (message_ingest.js), so hermes's URL-caching
+        # branches are dropped here; unrecognized entries pass through.
+        raw_urls = data.get("mediaUrls", [])
+        cached_urls = []
+        media_types = []
+        for url in raw_urls:
+            if msg_type == MessageType.PHOTO and os.path.isabs(url):
+                # Local file path — bridge already downloaded the image
+                cached_urls.append(url)
+                media_types.append("image/jpeg")
+                logger.info("[whatsapp] Using bridge-cached image: %s", url)
+            elif msg_type == MessageType.VOICE and os.path.isabs(url):
+                # Local file path — bridge already downloaded the audio
+                cached_urls.append(url)
+                media_types.append("audio/ogg")
+                logger.info("[whatsapp] Using bridge-cached audio: %s", url)
+            elif msg_type == MessageType.DOCUMENT and os.path.isabs(url):
+                # Local file path — bridge already downloaded the document
+                cached_urls.append(url)
+                ext = Path(url).suffix.lower()
+                mime = SUPPORTED_DOCUMENT_TYPES.get(ext, "application/octet-stream")
+                media_types.append(mime)
+                logger.info("[whatsapp] Using bridge-cached document: %s", url)
+            elif msg_type == MessageType.VIDEO and os.path.isabs(url):
+                cached_urls.append(url)
+                media_types.append("video/mp4")
+                logger.info("[whatsapp] Using bridge-cached video: %s", url)
+            else:
+                cached_urls.append(url)
+                media_types.append("unknown")
+
+        # For text-readable documents, inject file content directly into
+        # the message text so the agent can read it inline.
+        # Cap at 100KB to match Telegram/Discord/Slack behaviour.
         body = data.get("body", "")
+        if data.get("isGroup"):
+            body = self._clean_bot_mention_text(body, data)
+
+        # If this is a reply, include the quoted message text so the agent
+        # knows exactly what the user is responding to (fixes "approve" context issue)
+        quoted_text = str(data.get("quotedText") or "").strip()
+        if quoted_text and data.get("hasQuotedMessage"):
+            # Truncate long quoted text to keep prompts reasonable
+            if len(quoted_text) > 300:
+                quoted_text = quoted_text[:297] + "..."
+            body = f"[Replying to: \"{quoted_text}\"]\n{body}"
+        MAX_TEXT_INJECT_BYTES = 100 * 1024
+        if msg_type == MessageType.DOCUMENT and cached_urls:
+            for doc_path in cached_urls:
+                ext = Path(doc_path).suffix.lower()
+                if ext in {".txt", ".md", ".csv", ".json", ".xml", ".yaml", ".yml", ".log", ".py", ".js", ".ts", ".html", ".css"}:
+                    try:
+                        file_size = Path(doc_path).stat().st_size
+                        if file_size > MAX_TEXT_INJECT_BYTES:
+                            logger.info("[whatsapp] Skipping text injection for %s (%s bytes > %s)", doc_path, file_size, MAX_TEXT_INJECT_BYTES)
+                            continue
+                        content = Path(doc_path).read_text(encoding="utf-8", errors="replace")
+                        fname = Path(doc_path).name
+                        # Remove the doc_<hex>_ prefix for display
+                        display_name = fname
+                        if "_" in fname:
+                            parts = fname.split("_", 2)
+                            if len(parts) >= 3:
+                                display_name = parts[2]
+                        injection = f"[Content of {display_name}]:\n{content}"
+                        if body:
+                            body = f"{injection}\n\n{body}"
+                        else:
+                            body = injection
+                        logger.info("[whatsapp] Injected text content from: %s", doc_path)
+                    except Exception as e:
+                        logger.warning("[whatsapp] Failed to read document text: %s", e)
+
         raw_message = dict(data)
         raw_message["chatName"] = chat_name
         return MessageEvent(
@@ -952,8 +1116,8 @@ class ChannelsDaemon:
             source=source,
             raw_message=raw_message,
             message_id=data.get("messageId"),
-            media_urls=[str(url) for url in data.get("mediaUrls", []) if url],
-            media_types=[],
+            media_urls=cached_urls,
+            media_types=media_types,
             internal=persist_only,
         )
 
@@ -1132,8 +1296,18 @@ class ChannelsDaemon:
             # rotations via parent_session_id.
             logger.info("Session auto-reset (%s) for %s", reset_reason, key)
             db_end_session_id = entry.session_id
+        # Track whether the expired session had any real conversation
+        # (hermes checked entry.total_tokens; channels counts stored messages).
+        reset_had_activity = bool(db_end_session_id and self._db.get_messages(db_end_session_id))
         session_id = f"session_{uuid.uuid4().hex}"
-        entry = SessionEntry(session_id=session_id, origin=source, parent_session_id=db_end_session_id)
+        entry = SessionEntry(
+            session_id=session_id,
+            origin=source,
+            parent_session_id=db_end_session_id,
+            was_auto_reset=db_end_session_id is not None,
+            auto_reset_reason=reset_reason if db_end_session_id else None,
+            reset_had_activity=reset_had_activity,
+        )
         self._session_entries[key] = entry
         self._save_sessions()
         if db_end_session_id:
@@ -1217,6 +1391,9 @@ class ChannelsDaemon:
                             origin=origin,
                             parent_session_id=entry_data.get("parent_session_id"),
                             updated_at=updated_at,
+                            was_auto_reset=entry_data.get("was_auto_reset", False),
+                            auto_reset_reason=entry_data.get("auto_reset_reason"),
+                            reset_had_activity=entry_data.get("reset_had_activity", False),
                         )
                     except (KeyError, TypeError):
                         continue
@@ -1226,6 +1403,35 @@ class ChannelsDaemon:
         self._sessions_dir.mkdir(parents=True, exist_ok=True)
         data = {key: entry.to_dict() for key, entry in self._session_entries.items()}
         atomic_json_write(self._sessions_index, data)
+
+    def _apply_whatsapp_revoke(self, source: SessionSource, raw: dict[str, Any]) -> None:
+        source_chat_id = str(raw.get("chatId") or "").strip()
+        source_message_id = str(raw.get("messageId") or "").strip()
+        if not source_chat_id or not source_message_id:
+            return
+
+        deleted = 0
+        try:
+            deleted = int(
+                self._db.delete_message_by_source_key(
+                    source_chat_id=source_chat_id,
+                    source_message_id=source_message_id,
+                )
+            )
+        except Exception as exc:
+            logger.warning(
+                "Failed to apply WhatsApp revoke in state.db chat=%s message=%s: %s",
+                source_chat_id,
+                source_message_id,
+                exc,
+            )
+
+        logger.info(
+            "Applied WhatsApp revoke chat=%s message=%s deleted_rows=%d",
+            source_chat_id,
+            source_message_id,
+            deleted,
+        )
 
     def _persist_history_event(self, event: MessageEvent) -> None:
         raw = event.raw_message if isinstance(event.raw_message, dict) else {}
@@ -1432,6 +1638,36 @@ class ChannelsDaemon:
         if chat_id:
             return chat_id.split("@", 1)[0] or chat_id
         return "unknown-chat"
+
+    @staticmethod
+    def _normalize_whatsapp_id(value: Optional[str]) -> str:
+        if not value:
+            return ""
+        normalized = str(value).strip()
+        if ":" in normalized and "@" in normalized:
+            normalized = re.sub(r":.*@", "@", normalized, count=1)
+        return normalized
+
+    def _bot_ids_from_message(self, data: dict[str, Any]) -> set[str]:
+        bot_ids = set()
+        for candidate in data.get("botIds") or []:
+            normalized = self._normalize_whatsapp_id(candidate)
+            if normalized:
+                bot_ids.add(normalized)
+        return bot_ids
+
+    def _clean_bot_mention_text(self, text: str, data: dict[str, Any]) -> str:
+        if not text:
+            return text
+        bot_ids = self._bot_ids_from_message(data)
+        cleaned = text
+        for bot_id in bot_ids:
+            bare_id = bot_id.split("@", 1)[0]
+            if bare_id:
+                cleaned = re.sub(
+                    rf"@{re.escape(bare_id)}\b[,:\-]*\s*", "", cleaned
+                )
+        return cleaned.strip() or text
 
     @staticmethod
     def _bridge_delivery_mode(data: dict[str, Any]) -> str:
