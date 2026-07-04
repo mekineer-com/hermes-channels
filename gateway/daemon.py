@@ -1076,14 +1076,6 @@ class ChannelsDaemon:
         if data.get("isGroup"):
             body = self._clean_bot_mention_text(body, data)
 
-        # If this is a reply, include the quoted message text so the agent
-        # knows exactly what the user is responding to (fixes "approve" context issue)
-        quoted_text = str(data.get("quotedText") or "").strip()
-        if quoted_text and data.get("hasQuotedMessage"):
-            # Truncate long quoted text to keep prompts reasonable
-            if len(quoted_text) > 300:
-                quoted_text = quoted_text[:297] + "..."
-            body = f"[Replying to: \"{quoted_text}\"]\n{body}"
         MAX_TEXT_INJECT_BYTES = 100 * 1024
         if msg_type == MessageType.DOCUMENT and cached_urls:
             for doc_path in cached_urls:
