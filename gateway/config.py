@@ -38,7 +38,6 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "web_source_resource_block": True,
     "reply_prefix": None,
     "session_reset_mode": "both",
-    "session_reset_notify": True,
     "session_reset_at_hour": 4,
     "session_reset_idle_minutes": 1440,
 }
@@ -68,7 +67,6 @@ class DaemonSettings:
     # Session reset policy (hermes SessionResetPolicy defaults):
     # "daily", "idle", "both" (whichever triggers first), or "none".
     session_reset_mode: str = "both"
-    session_reset_notify: bool = True
     session_reset_at_hour: int = 4
     session_reset_idle_minutes: int = 1440
 
@@ -134,7 +132,6 @@ def load_config() -> DaemonSettings:
         web_source_resource_block=_coerce_bool(data["web_source_resource_block"], True),
         reply_prefix=None if data["reply_prefix"] is None else str(data["reply_prefix"]),
         session_reset_mode=str(data["session_reset_mode"]).strip().lower(),
-        session_reset_notify=_coerce_bool(data["session_reset_notify"], True),
         session_reset_at_hour=_coerce_int(data["session_reset_at_hour"], DEFAULT_CONFIG["session_reset_at_hour"], "session_reset_at_hour"),
         session_reset_idle_minutes=_coerce_int(data["session_reset_idle_minutes"], DEFAULT_CONFIG["session_reset_idle_minutes"], "session_reset_idle_minutes"),
     )

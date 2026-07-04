@@ -82,7 +82,6 @@ HERMES_HUNK_RANGES = {
     "directory_writer": "gateway/channel_directory.py:104-110",
     "inbound_preprocessing": "gateway/platforms/whatsapp.py:1800-1913; gateway/platforms/whatsapp_common.py:121-127,222-228,262-273; gateway/platforms/base.py:1124-1148",
     "revoke": "gateway/platforms/whatsapp.py:1748-1780; gateway/run.py:7482-7496,10770-10830; hermes_state.py:2815-2855",
-    "session_reset_notice": "gateway/run.py:9170-9231; gateway/session.py:485-487,996-1035",
 }
 
 
@@ -173,9 +172,6 @@ class SessionEntry:
     origin: SessionSource
     parent_session_id: str | None = None
     updated_at: datetime = field(default_factory=datetime.now)
-    was_auto_reset: bool = False
-    auto_reset_reason: Optional[str] = None  # "idle" or "daily"
-    reset_had_activity: bool = False  # whether the expired session had any messages
 
     def to_dict(self) -> dict[str, Any]:
         out = {
@@ -185,9 +181,6 @@ class SessionEntry:
         }
         if self.parent_session_id:
             out["parent_session_id"] = self.parent_session_id
-        out["was_auto_reset"] = self.was_auto_reset
-        out["auto_reset_reason"] = self.auto_reset_reason
-        out["reset_had_activity"] = self.reset_had_activity
         return out
 
 
@@ -816,31 +809,6 @@ class ChannelsDaemon:
     async def _handle_turn(self, event: MessageEvent, session_key: str) -> str:
         source = event.source
         entry = self.get_or_create_session(source)
-        # Send a user-facing notification explaining the reset, unless:
-        # - notifications are disabled in config
-        # - the expired session had no activity (nothing was cleared)
-        if entry.was_auto_reset:
-            reset_reason = entry.auto_reset_reason or "idle"
-            try:
-                should_notify = self.settings.session_reset_notify and entry.reset_had_activity
-                if should_notify:
-                    if reset_reason == "daily":
-                        reason_text = f"daily schedule at {self.settings.session_reset_at_hour}:00"
-                    else:
-                        hours = self.settings.session_reset_idle_minutes // 60
-                        mins = self.settings.session_reset_idle_minutes % 60
-                        duration = f"{hours}h" if not mins else f"{hours}h {mins}m" if hours else f"{mins}m"
-                        reason_text = f"inactive for {duration}"
-                    notice = (
-                        f"◐ Session automatically reset ({reason_text}). "
-                        f"Conversation history cleared."
-                    )
-                    await self.send(source.chat_id, notice)
-            except Exception as e:
-                logger.debug("Auto-reset notification failed (non-fatal): %s", e)
-            entry.was_auto_reset = False
-            entry.auto_reset_reason = None
-            self._save_sessions()
         raw = event.raw_message if isinstance(event.raw_message, dict) else {}
         source_chat_id = str(raw.get("chatId") or "").strip() or None
         source_message_id = str(raw.get("messageId") or "").strip() or None
@@ -1291,17 +1259,11 @@ class ChannelsDaemon:
             # rotations via parent_session_id.
             logger.info("Session auto-reset (%s) for %s", reset_reason, key)
             db_end_session_id = entry.session_id
-        # Track whether the expired session had any real conversation
-        # (hermes checked entry.total_tokens; channels checks the stored count).
-        reset_had_activity = bool(db_end_session_id and self._db.session_message_count(db_end_session_id))
         session_id = f"session_{uuid.uuid4().hex}"
         entry = SessionEntry(
             session_id=session_id,
             origin=source,
             parent_session_id=db_end_session_id,
-            was_auto_reset=db_end_session_id is not None,
-            auto_reset_reason=reset_reason if db_end_session_id else None,
-            reset_had_activity=reset_had_activity,
         )
         self._session_entries[key] = entry
         self._save_sessions()
@@ -1386,9 +1348,6 @@ class ChannelsDaemon:
                             origin=origin,
                             parent_session_id=entry_data.get("parent_session_id"),
                             updated_at=updated_at,
-                            was_auto_reset=entry_data.get("was_auto_reset", False),
-                            auto_reset_reason=entry_data.get("auto_reset_reason"),
-                            reset_had_activity=entry_data.get("reset_had_activity", False),
                         )
                     except (KeyError, TypeError):
                         continue

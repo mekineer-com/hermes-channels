@@ -243,17 +243,6 @@ class ChannelsStateDB:
 
         self._execute_write(_do)
 
-    def session_message_count(self, session_id: str) -> int:
-        sid = str(session_id or "").strip()
-        if not sid:
-            return 0
-        with self._lock:
-            row = self._conn.execute(
-                "SELECT message_count FROM sessions WHERE id = ?",
-                (sid,),
-            ).fetchone()
-        return int(row[0] or 0) if row else 0
-
     def delete_message_by_source_key(
         self,
         *,
