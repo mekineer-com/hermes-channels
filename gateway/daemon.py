@@ -377,6 +377,15 @@ class ChannelsDaemon:
         finally:
             await self.disconnect()
 
+    def _whatsapp_mode(self) -> str:
+        configured = str(self.settings.mode or "").strip().lower()
+        if configured in {"bot", "self-chat"}:
+            return configured
+        env_mode = os.getenv("WHATSAPP_MODE", "").strip().lower()
+        if env_mode in {"bot", "self-chat"}:
+            return env_mode
+        return "self-chat"
+
     async def connect(self) -> bool:
         if not shutil.which("node"):
             logger.warning("[whatsapp] Node.js not found. WhatsApp requires Node.js.")
@@ -456,7 +465,7 @@ class ChannelsDaemon:
         env["CHANNELS_AUDIO_CACHE_DIR"] = str(self.whatsapp_home / "audio_cache")
         env["CHANNELS_DOCUMENT_CACHE_DIR"] = str(self.whatsapp_home / "document_cache")
         self._bridge_process = subprocess.Popen(
-            ["node", str(bridge_path), "--port", str(self._bridge_port), "--session", str(self._session_path), "--mode", "self-chat"],
+            ["node", str(bridge_path), "--port", str(self._bridge_port), "--session", str(self._session_path), "--mode", self._whatsapp_mode()],
             stdout=self._bridge_log_fh,
             stderr=self._bridge_log_fh,
             preexec_fn=None if _IS_WINDOWS else os.setsid,
