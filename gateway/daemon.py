@@ -80,6 +80,9 @@ HERMES_HUNK_RANGES = {
     "transcript_persistence": "gateway/run.py:10927-11046; gateway/session.py:791-812,1018-1031,1289-1296",
     "state_db": "hermes_state.py:539-641,1390-1441,2532-2652,2857-3016,4087-4102",
     "directory_writer": "gateway/channel_directory.py:104-110",
+    "inbound_preprocessing": "gateway/platforms/whatsapp.py:1800-1913; gateway/platforms/whatsapp_common.py:121-127,222-228,262-273; gateway/platforms/base.py:1124-1148",
+    "revoke": "gateway/platforms/whatsapp.py:1748-1780; gateway/run.py:7482-7496,10770-10830; hermes_state.py:2815-2855",
+    "session_reset_notice": "gateway/run.py:9170-9231; gateway/session.py:485-487,996-1035",
 }
 
 
@@ -1297,8 +1300,8 @@ class ChannelsDaemon:
             logger.info("Session auto-reset (%s) for %s", reset_reason, key)
             db_end_session_id = entry.session_id
         # Track whether the expired session had any real conversation
-        # (hermes checked entry.total_tokens; channels counts stored messages).
-        reset_had_activity = bool(db_end_session_id and self._db.get_messages(db_end_session_id))
+        # (hermes checked entry.total_tokens; channels checks the stored count).
+        reset_had_activity = bool(db_end_session_id and self._db.session_message_count(db_end_session_id))
         session_id = f"session_{uuid.uuid4().hex}"
         entry = SessionEntry(
             session_id=session_id,
