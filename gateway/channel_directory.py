@@ -9,6 +9,7 @@ from typing import Any
 
 from gateway.home import channels_home
 from gateway.util import atomic_json_write
+from gateway.whatsapp_known_contacts import is_placeholder_whatsapp_name
 
 
 def write_channel_directory(
@@ -22,12 +23,11 @@ def write_channel_directory(
 
     # Hermes parity (_build_from_sessions): the directory lists only chats
     # with session history, never the raw contact store.
-    channels: list[dict[str, str]] = []
-    seen: set[str] = set()
+    entries_by_id: dict[str, dict[str, str]] = {}
     for row in _whatsapp_sessions(sessions_index_path):
-        if row["id"] not in seen:
-            channels.append(row)
-            seen.add(row["id"])
+        existing = entries_by_id.get(row["id"])
+        entries_by_id[row["id"]] = _better_session_entry(existing, row) if existing else row
+    channels = list(entries_by_id.values())
 
     directory = {
         "updated_at": datetime.now().isoformat(),
@@ -35,6 +35,27 @@ def write_channel_directory(
     }
     atomic_json_write(output_path, directory)
     return directory
+
+
+def _better_session_entry(
+    existing: dict[str, str],
+    candidate: dict[str, str],
+) -> dict[str, str]:
+    merged = dict(existing)
+    existing_name = existing.get("name")
+    candidate_name = candidate.get("name")
+    if (
+        is_placeholder_whatsapp_name(existing_name)
+        and candidate_name
+        and not is_placeholder_whatsapp_name(candidate_name)
+    ):
+        merged["name"] = candidate_name
+    for key, value in candidate.items():
+        if key == "name":
+            continue
+        if merged.get(key) in (None, "") and value not in (None, ""):
+            merged[key] = value
+    return merged
 
 
 def _whatsapp_sessions(path: Path) -> list[dict[str, str]]:
