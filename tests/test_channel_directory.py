@@ -42,8 +42,9 @@ def test_directory_writer_output_shape(tmp_path, monkeypatch):
     out = write_channel_directory()
 
     assert set(out) == {"updated_at", "platforms"}
+    # Contact-store entries ("123@lid") must NOT appear: hermes parity —
+    # the directory lists only chats with session history.
     assert out["platforms"]["whatsapp"] == [
-        {"id": "123@lid", "name": "Ada", "type": "dm"},
         {"id": "g@g.us", "name": "Group", "type": "group"},
     ]
     assert json.loads((tmp_path / "channel_directory.json").read_text()) == out
