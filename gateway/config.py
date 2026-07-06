@@ -33,6 +33,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "mode": "",
     "web_source_enabled": True,
     "web_source_headful": False,
+    "web_source_auto_headful": False,
     "web_source_chromium_path": "",
     "web_source_disable_service_workers": False,
     "web_source_resource_block": True,
@@ -57,6 +58,7 @@ class DaemonSettings:
     text_batch_split_delay_seconds: float
     web_source_enabled: bool
     web_source_headful: bool
+    web_source_auto_headful: bool = False
     # "bot" | "self-chat"; empty = env WHATSAPP_MODE, then self-chat.
     mode: str = ""
     web_source_chromium_path: str = ""
@@ -127,6 +129,7 @@ def load_config() -> DaemonSettings:
         mode=str(data["mode"] or "").strip().lower(),
         web_source_enabled=_coerce_bool(data["web_source_enabled"], True),
         web_source_headful=_coerce_bool(data["web_source_headful"], False),
+        web_source_auto_headful=_coerce_bool(data["web_source_auto_headful"], False),
         web_source_chromium_path=str(data["web_source_chromium_path"] or "").strip(),
         web_source_disable_service_workers=_coerce_bool(data["web_source_disable_service_workers"], False),
         web_source_resource_block=_coerce_bool(data["web_source_resource_block"], True),

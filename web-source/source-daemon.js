@@ -179,14 +179,13 @@ async function main() {
   }
 
   client.on('qr', (qr) => {
-    console.log('Pair WhatsApp Web with this QR payload:');
-    console.log(qr);
-    status.write({ state: 'pairing', wwebjs_ready: false, db_writeable: true }, { immediate: true });
+    console.log('Pair WhatsApp Web with the QR shown by the launcher.');
+    status.write({ state: 'pairing', qr, wwebjs_ready: false, db_writeable: true }, { immediate: true });
   });
 
   client.on('authenticated', () => {
     console.log('WhatsApp Web source authenticated');
-    status.write({ state: 'authenticated', wwebjs_ready: false, db_writeable: true }, { immediate: true });
+    status.write({ state: 'authenticated', qr: null, wwebjs_ready: false, db_writeable: true }, { immediate: true });
   });
 
   client.on('auth_failure', (message) => {
@@ -203,7 +202,7 @@ async function main() {
   client.on('ready', async () => {
     console.log('WhatsApp Web source ready');
     wwebjsReady = true;
-    status.write({ state: 'ready', wwebjs_ready: true, db_writeable: true, error: null }, { immediate: true });
+    status.write({ state: 'ready', qr: null, wwebjs_ready: true, db_writeable: true, error: null }, { immediate: true });
     if (args['no-resource-block'] !== true) {
       try {
         await configureResourceBlocking(client.pupPage);

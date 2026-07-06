@@ -88,6 +88,7 @@ const CHUNK_DELAY_MS = parseInt(process.env.WHATSAPP_CHUNK_DELAY_MS || '300', 10
 const BAILEYS_VERSION_FETCH_TIMEOUT_MS = parseInt(process.env.WHATSAPP_BAILEYS_VERSION_FETCH_TIMEOUT_MS || '5000', 10);
 const BAILEYS_VERSION_FALLBACK = [2, 3000, 1023223821];
 const SYNC_HISTORY_WINDOW_DAYS = parseFloat(process.env.WHATSAPP_SYNC_HISTORY_WINDOW_DAYS || '14');
+let currentQr = null;
 const BRIDGE_STARTED_AT_SECONDS = Math.floor(Date.now() / 1000);
 const STARTUP_REPLAY_GRACE_SECONDS = Math.max(
   0,
@@ -328,6 +329,7 @@ async function startSocket() {
     const { connection, lastDisconnect, qr, receivedPendingNotifications } = update;
 
     if (qr) {
+      currentQr = qr;
       console.log('\n📱 Scan this QR code with WhatsApp on your phone:\n');
       qrcode.generate(qr, { small: true });
       console.log('\nWaiting for scan...\n');
@@ -358,6 +360,7 @@ async function startSocket() {
         socketLifecycle.scheduleStart(reason === 515 ? 1000 : 3000);
       }
     } else if (connection === 'open') {
+      currentQr = null;
       socketLifecycle.markOpen(socketId);
       if (PAIR_ONLY) {
         console.log('✅ Pairing complete. Credentials saved.');
@@ -687,6 +690,8 @@ app.get('/health', (req, res) => {
   const stats = durableQueue.getStats();
   res.json({
     status: socketLifecycle.getState(),
+    paired: socketLifecycle.isConnected(),
+    qr: currentQr,
     mode: WHATSAPP_MODE,
     replyPrefix: REPLY_PREFIX,
     queueLength: stats.queueLength,

@@ -7,6 +7,7 @@ from dataclasses import dataclass
 
 import pytest
 
+import gateway.daemon as daemon_module
 from gateway.config import DaemonSettings
 from gateway.daemon import (
     ChannelsDaemon,
@@ -125,6 +126,82 @@ def test_dedup_gate_marks_wal_processed(tmp_path, monkeypatch):
         daemon._db.mark_message_source_key_processed(source_chat_id="123@lid", source_message_id="m1")
         await daemon._dispatch_built_message_event(event())
         assert daemon._gateway_wal.processed_up_to == 1
+        await daemon.disconnect()
+
+    asyncio.run(run())
+
+
+def test_connect_without_creds_starts_bridge_http_but_not_polling(tmp_path, monkeypatch):
+    async def run():
+        real_sleep = asyncio.sleep
+        settings_obj = settings()
+        settings_obj.web_source_enabled = True
+        settings_obj.web_source_auto_headful = False
+        daemon = ChannelsDaemon(settings_obj, memu_client=FakeMemu())
+        daemon.whatsapp_home = tmp_path / "whatsapp"
+        daemon._session_path = daemon.whatsapp_home / "session"
+        daemon._bridge_script = tmp_path / "bridge" / "bridge.js"
+        daemon._bridge_script.parent.mkdir(parents=True)
+        daemon._bridge_script.write_text("// bridge\n", encoding="utf-8")
+        daemon._bridge_port = 3123
+
+        class FakeProcess:
+            pid = 1234
+
+            def poll(self):
+                return None
+
+        class FakeCompleted:
+            returncode = 0
+            stderr = ""
+
+        popen_calls = []
+        web_source_calls = []
+        replay_calls = []
+        poll_calls = []
+        monitor_calls = []
+
+        async def fast_sleep(_seconds):
+            await real_sleep(0)
+
+        async def bridge_health():
+            return {"status": "connecting", "qr": "qr-1"}
+
+        async def replay_gateway_wal():
+            replay_calls.append(True)
+
+        async def poll_messages():
+            poll_calls.append(True)
+
+        async def monitor_setup():
+            monitor_calls.append(True)
+
+        monkeypatch.setattr(daemon_module.shutil, "which", lambda _name: "/usr/bin/node")
+        monkeypatch.setattr(daemon_module, "_file_content_hash", lambda _path: "hash")
+        monkeypatch.setattr(daemon_module, "_kill_stale_bridge_by_pidfile", lambda *_args, **_kwargs: None)
+        monkeypatch.setattr(daemon_module, "_kill_port_process", lambda *_args, **_kwargs: None)
+        monkeypatch.setattr(daemon_module.asyncio, "sleep", fast_sleep)
+        monkeypatch.setattr(
+            daemon_module.subprocess,
+            "Popen",
+            lambda *args, **kwargs: popen_calls.append((args, kwargs)) or FakeProcess(),
+        )
+        monkeypatch.setattr(daemon_module.subprocess, "run", lambda *_args, **_kwargs: FakeCompleted())
+        daemon._acquire_session_lock = lambda: True
+        daemon._bridge_health = bridge_health
+        daemon._start_web_source = lambda: web_source_calls.append(daemon._web_source_pairing_headful) or True
+        daemon._replay_gateway_wal = replay_gateway_wal
+        daemon._poll_messages = poll_messages
+        daemon._monitor_web_source_setup = monitor_setup
+
+        assert await daemon.connect() is True
+        await real_sleep(0)
+
+        assert popen_calls
+        assert web_source_calls == [False]
+        assert monitor_calls == [True]
+        assert replay_calls == []
+        assert poll_calls == []
         await daemon.disconnect()
 
     asyncio.run(run())

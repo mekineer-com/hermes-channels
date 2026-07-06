@@ -427,15 +427,9 @@ class ChannelsDaemon:
             return False
 
         creds_path = self._session_path / "creds.json"
-        if not creds_path.exists():
+        had_creds = creds_path.exists()
+        if not had_creds:
             logger.warning("[whatsapp] WhatsApp enabled but not paired (no creds.json at %s).", creds_path)
-            self._running = True
-            if self.settings.web_source_enabled and not self.settings.web_source_headful:
-                self._web_source_pairing_headful = True
-            self._start_web_source()
-            self._poll_task = asyncio.create_task(self._monitor_web_source_setup())
-            return True
-
         bridge_dir = bridge_path.parent
         pkg_json = bridge_dir / "package.json"
         dep_stamp = bridge_dir / "node_modules" / ".channels-pkg-hash"
@@ -516,6 +510,18 @@ class ChannelsDaemon:
         if not http_ready:
             self._close_bridge_log()
             return False
+
+        if not had_creds and data.get("status") != "connected":
+            self._running = True
+            if (
+                self.settings.web_source_enabled
+                and not self.settings.web_source_headful
+                and self.settings.web_source_auto_headful
+            ):
+                self._web_source_pairing_headful = True
+            self._start_web_source()
+            self._poll_task = asyncio.create_task(self._monitor_web_source_setup())
+            return True
 
         if data.get("status") != "connected":
             for _ in range(15):
@@ -1820,6 +1826,7 @@ class ChannelsDaemon:
             status.get("state") == "pairing"
             and not self.settings.web_source_headful
             and not self._web_source_pairing_headful
+            and self.settings.web_source_auto_headful
         ):
             logger.info("[whatsapp] WhatsApp web-source needs pairing; opening Chromium window")
             if self._stop_web_source():

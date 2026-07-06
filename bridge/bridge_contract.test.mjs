@@ -33,3 +33,11 @@ test('bridge does not report connected until socket open', () => {
   assert.match(bridgeSource, /status:\s*socketLifecycle\.getState\(\)/);
   assert.match(socketLifecycleSource, /state\s*=\s*'connecting'/);
 });
+
+test('bridge exposes current pairing QR through health only while unpaired', () => {
+  assert.match(bridgeSource, /let currentQr\s*=\s*null/);
+  assert.match(bridgeSource, /currentQr\s*=\s*qr/);
+  assert.match(bridgeSource, /currentQr\s*=\s*null/);
+  assert.match(bridgeSource, /paired:\s*socketLifecycle\.isConnected\(\)/);
+  assert.match(bridgeSource, /qr:\s*currentQr/);
+});
