@@ -344,6 +344,7 @@ async function startSocket() {
     }
 
     if (connection === 'close') {
+      currentQr = null;
       const reason = new Boom(lastDisconnect?.error)?.output?.statusCode;
       socketLifecycle.markDisconnected(socketId);
 
