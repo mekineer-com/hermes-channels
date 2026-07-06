@@ -190,7 +190,7 @@ async function main() {
 
   client.on('auth_failure', (message) => {
     console.error('WhatsApp Web source auth failure:', message);
-    status.write({ state: 'auth_failure', wwebjs_ready: false, db_writeable: !store.exitedError, error: String(message) }, { immediate: true });
+    status.write({ state: 'auth_failure', qr: null, wwebjs_ready: false, db_writeable: !store.exitedError, error: String(message) }, { immediate: true });
     contacts.stop();
     memoryDiagnostics.stop();
     client.destroy().catch(() => {});

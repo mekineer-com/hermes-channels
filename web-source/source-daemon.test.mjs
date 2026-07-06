@@ -23,5 +23,6 @@ test('source daemon persists QR payload without logging it', () => {
   assert.match(source, /status\.write\(\{\s*state:\s*'pairing',\s*qr,/);
   assert.doesNotMatch(source, /console\.log\(qr\)/);
   assert.match(source, /state:\s*'authenticated',\s*qr:\s*null/);
+  assert.match(source, /state:\s*'auth_failure',\s*qr:\s*null/);
   assert.match(source, /state:\s*'ready',\s*qr:\s*null/);
 });
