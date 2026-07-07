@@ -81,3 +81,30 @@ def test_out_of_order_completion_waits_for_contiguous_prefix(tmp_path):
 
     assert wal.mark_processed(1) is True
     assert wal.pending() == []
+
+
+def test_failed_append_does_not_consume_wal_seq(tmp_path, monkeypatch):
+    wal_path = tmp_path / "gateway_wal.jsonl"
+    offset_path = tmp_path / "gateway_wal.offset"
+    wal = WhatsAppGatewayWal(
+        wal_path=wal_path,
+        offset_path=offset_path,
+        compact_every=100,
+    )
+
+    def fail_append(_row):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(wal, "_append_row", fail_append)
+    try:
+        wal.append({"seq": 11, "chatId": "x", "body": "one"})
+    except OSError:
+        pass
+    else:
+        raise AssertionError("append should surface durable-write failure")
+
+    monkeypatch.undo()
+    row = wal.append({"seq": 12, "chatId": "x", "body": "two"})
+
+    assert row is not None
+    assert row["wal_seq"] == 1
