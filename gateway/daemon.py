@@ -821,16 +821,25 @@ class ChannelsDaemon:
         sender_id = str(raw.get("senderId") or source.user_id or "").strip() or None
         sender_name = str(raw.get("senderName") or source.user_name or "").strip() or None
         message_timestamp = _coerce_gateway_timestamp(raw.get("timestamp"))
-        self._db.append_message(
-            session_id=entry.session_id,
-            role="user",
-            content=event.text,
-            sender_id=sender_id,
-            sender_name=sender_name,
-            source_chat_id=source_chat_id,
-            source_message_id=source_message_id,
-            timestamp=message_timestamp,
+        already_persisted = bool(
+            source_chat_id
+            and source_message_id
+            and self._db.message_source_key_exists(
+                source_chat_id=source_chat_id,
+                source_message_id=source_message_id,
+            )
         )
+        if not already_persisted:
+            self._db.append_message(
+                session_id=entry.session_id,
+                role="user",
+                content=event.text,
+                sender_id=sender_id,
+                sender_name=sender_name,
+                source_chat_id=source_chat_id,
+                source_message_id=source_message_id,
+                timestamp=message_timestamp,
+            )
         if sender_id or sender_name:
             self._db.set_latest_user_sender(entry.session_id, sender_id=sender_id, sender_name=sender_name)
 
@@ -1499,15 +1508,14 @@ class ChannelsDaemon:
             source_message_id=source_message_id,
         )
         if not handled:
+            # A bare persisted row is NOT handled: history-sync copies are
+            # persist-only (stored, never answered), so the live copy must
+            # still get its turn. Skip only when a response exists or the
+            # key was marked processed (covers listen-only outcomes).
             handled = self._db.message_source_key_has_response(
                 source_chat_id=source_chat_id,
                 source_message_id=source_message_id,
             )
-            if not handled:
-                handled = self._db.message_source_key_exists(
-                    source_chat_id=source_chat_id,
-                    source_message_id=source_message_id,
-                )
             if handled:
                 self._db.mark_message_source_key_processed(
                     source_chat_id=source_chat_id,
