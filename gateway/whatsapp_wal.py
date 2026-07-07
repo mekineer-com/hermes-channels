@@ -50,8 +50,11 @@ class WhatsAppGatewayWal:
             "bridge_seq": bridge_seq,
             "event": event,
         }
-        self._next_wal_seq += 1
         self._append_row(row)
+        # Only consume the seq once the row is durably on disk: a failed append
+        # must not leave a numbering gap, or mark_processed's contiguous offset
+        # advance stalls at the gap forever.
+        self._next_wal_seq += 1
         self._bridge_seq_to_wal_seq[bridge_seq] = int(row["wal_seq"])
         return row
 
