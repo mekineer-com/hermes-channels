@@ -1020,19 +1020,21 @@ def test_from_me_and_empty_history_record_arrival_without_turn(tmp_path, monkeyp
     asyncio.run(run())
 
 
-def test_history_recovery_ignores_live_max_age_gate(tmp_path, monkeypatch):
+def test_stale_history_records_without_turn(tmp_path, monkeypatch):
     async def run():
         memu = FakeMemu()
         daemon = make_daemon(tmp_path, monkeypatch, memu)
         daemon.send = lambda *_args, **_kwargs: asyncio.sleep(0, result=SendResult(True, "sent-1"))
         hist = history_event("old but recoverable", "old-history", wal_seq=1)
         hist.raw_message["timestamp"] = time.time() - (daemon.settings.max_message_age_seconds + 100)
+        daemon._record_whatsapp_arrival_raw(hist.raw_message)
 
         await daemon._dispatch_built_message_event(hist)
-        await wait_for_turns(memu, 1)
 
-        assert len(memu.turn_calls) == 1
-        assert memu.turn_calls[0]["message"] == "old but recoverable"
+        assert memu.turn_calls == []
+        assert daemon._db.message_source_key_exists(source_chat_id="123@lid", source_message_id="old-history")
+        assert daemon._db.get_whatsapp_arrival("123@lid", "old-history") is not None
+        assert daemon._gateway_wal.processed_up_to == 1
         await daemon.disconnect()
 
     asyncio.run(run())

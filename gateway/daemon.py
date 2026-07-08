@@ -1582,6 +1582,14 @@ class ChannelsDaemon:
             if wal_seq is not None:
                 self._gateway_wal.mark_processed(wal_seq)
 
+    def _event_is_stale(self, raw: dict[str, Any]) -> bool:
+        if self.settings.max_message_age_seconds <= 0:
+            return False
+        timestamp = _coerce_gateway_timestamp(raw.get("timestamp"))
+        if timestamp is None:
+            return False
+        return time.time() - timestamp > self.settings.max_message_age_seconds
+
     def _history_event_can_trigger_turn(self, event: MessageEvent) -> bool:
         raw = event.raw_message if isinstance(event.raw_message, dict) else {}
         if not self._whatsapp_source_key(raw):
@@ -1592,6 +1600,8 @@ class ChannelsDaemon:
             return False
         message_timestamp = _coerce_gateway_timestamp(raw.get("timestamp"))
         if message_timestamp is None:
+            return False
+        if self._event_is_stale(raw):
             return False
         active_since = self._db.get_soul_active_since(self.settings.soul_id)
         if active_since is not None and message_timestamp < active_since:
