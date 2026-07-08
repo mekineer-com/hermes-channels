@@ -114,7 +114,7 @@ test('handleUpsert drops fromMe messages in bot mode like old Hermes bridge', as
   assert.equal(queued.length, 0);
 });
 
-test('history events preserve fromMe so Python does not treat owner history as inbound', async () => {
+test('history events drop fromMe in bot mode like old Hermes bridge', async () => {
   const { ingest, queued } = makeIngest({ config: { whatsappMode: 'bot' } });
 
   await ingest.enqueueHistoryMessage({
@@ -123,9 +123,7 @@ test('history events preserve fromMe so Python does not treat owner history as i
     messageTimestamp: Math.floor(Date.now() / 1000),
   }, { surface: 'messaging-history.set' });
 
-  assert.equal(queued.length, 1);
-  assert.equal(queued[0].deliveryMode, 'persist_only');
-  assert.equal(queued[0].fromMe, true);
+  assert.equal(queued.length, 0);
 });
 
 test('handleUpdate queues revokes only for delete updates', () => {

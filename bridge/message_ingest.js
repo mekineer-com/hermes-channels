@@ -121,6 +121,7 @@ export function createMessageIngest(ctx) {
     const messageId = String(msg.key.id || '').trim();
     let chatId = normalizeId(msg.key.remoteJid || chatFallback || '');
     if (!chatId || !messageId || chatId.toLowerCase() === 'status@broadcast') return false;
+    if (msg.key.fromMe && config.whatsappMode === 'bot') return false;
 
     const timestamp = msg.messageTimestamp || msg.messageC2STimestamp || rawMsg?.messageTimestamp;
     if (!syncTimestampAllowed(timestamp, config.syncHistoryWindowDays)) return false;
