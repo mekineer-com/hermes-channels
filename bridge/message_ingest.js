@@ -231,7 +231,6 @@ export function createMessageIngest(ctx) {
       chatId,
       senderId,
       senderName: resolvedSenderName,
-      fromMe: !!msg.key.fromMe,
       chatName: resolvedChatName,
       isGroup: chatId.endsWith('@g.us'),
       body,
@@ -337,18 +336,6 @@ export function createMessageIngest(ctx) {
       }
       const senderNumber = senderId.replace(/@.*/, '');
       if (!mode.forwardable) {
-        continue;
-      }
-
-      if (msg.key.fromMe && config.whatsappMode === 'bot') {
-        if (config.debug) {
-          console.log(JSON.stringify({
-            event: 'ignored',
-            reason: 'bot_mode_rejects_from_me',
-            chatId,
-            messageId: msg.key.id,
-          }));
-        }
         continue;
       }
 
@@ -520,7 +507,6 @@ export function createMessageIngest(ctx) {
         chatId,
         senderId,
         senderName: resolvedSenderName,
-        fromMe: !!msg.key.fromMe,
         chatName: resolvedChatName,
         isGroup,
         body,

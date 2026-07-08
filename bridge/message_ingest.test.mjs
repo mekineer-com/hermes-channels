@@ -3,10 +3,7 @@ import assert from 'node:assert/strict';
 
 import { createMessageIngest } from './message_ingest.js';
 
-function makeIngest({
-  sock = { user: { id: '111:1@s.whatsapp.net', lid: '111@lid', name: 'Me' } },
-  config = {},
-} = {}) {
+function makeIngest({ sock = { user: { id: '111:1@s.whatsapp.net', lid: '111@lid', name: 'Me' } } } = {}) {
   const queued = [];
   const rememberedChats = [];
   const normalizeId = (value) => String(value || '').trim().replace(/:.*@/, '@');
@@ -51,7 +48,6 @@ function makeIngest({
       startupReplayGraceSeconds: 120,
       syncHistoryWindowDays: 14,
       whatsappMode: 'self-chat',
-      ...config,
     },
   });
   return { ingest, queued, rememberedChats };
@@ -76,7 +72,6 @@ test('handleUpsert queues a self-chat text event with current delivery fields', 
     chatId: '111@s.whatsapp.net',
     senderId: '111@s.whatsapp.net',
     senderName: 'Me',
-    fromMe: true,
     chatName: '111',
     isGroup: false,
     body: 'hello',
@@ -97,35 +92,6 @@ test('handleUpsert queues a self-chat text event with current delivery fields', 
     chatId: '111@s.whatsapp.net',
     row: { isGroup: false, name: '111', lastSenderName: '' },
   }]);
-});
-
-test('handleUpsert drops fromMe messages in bot mode like old Hermes bridge', async () => {
-  const { ingest, queued } = makeIngest({ config: { whatsappMode: 'bot' } });
-
-  await ingest.handleUpsert({
-    type: 'notify',
-    messages: [{
-      key: { remoteJid: '222@s.whatsapp.net', id: 'owner-typed', fromMe: true },
-      message: { conversation: 'hey mom' },
-      messageTimestamp: 1000,
-    }],
-  });
-
-  assert.equal(queued.length, 0);
-});
-
-test('history events preserve fromMe so Python does not treat owner history as inbound', async () => {
-  const { ingest, queued } = makeIngest({ config: { whatsappMode: 'bot' } });
-
-  await ingest.enqueueHistoryMessage({
-    key: { remoteJid: '222@s.whatsapp.net', id: 'hist-owner', fromMe: true },
-    message: { conversation: 'older owner text' },
-    messageTimestamp: Math.floor(Date.now() / 1000),
-  }, { surface: 'messaging-history.set' });
-
-  assert.equal(queued.length, 1);
-  assert.equal(queued[0].deliveryMode, 'persist_only');
-  assert.equal(queued[0].fromMe, true);
 });
 
 test('handleUpdate queues revokes only for delete updates', () => {
