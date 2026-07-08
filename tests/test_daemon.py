@@ -941,6 +941,30 @@ def test_history_then_live_records_both_arrivals_and_turns_once(tmp_path, monkey
     asyncio.run(run())
 
 
+def test_history_then_live_different_ids_do_not_duplicate_text(tmp_path, monkeypatch):
+    async def run():
+        memu = FakeMemu()
+        daemon = make_daemon(tmp_path, monkeypatch, memu)
+        daemon.send = lambda *_args, **_kwargs: asyncio.sleep(0, result=SendResult(True, "sent-1"))
+
+        hist = history_event("hello", "hist-1", wal_seq=1)
+        live = event("hello", "live-1")
+        live.raw_message["timestamp"] = time.time()
+        live.raw_message["wal_seq"] = 2
+        daemon._record_whatsapp_arrival_raw(hist.raw_message)
+        await daemon._dispatch_built_message_event(hist)
+        daemon._record_whatsapp_arrival_raw(live.raw_message)
+        await daemon._dispatch_built_message_event(live)
+        await wait_for_turns(memu, 1)
+
+        assert len(memu.turn_calls) == 1
+        assert memu.turn_calls[0]["message"] == "hello"
+        await wait_until(lambda: daemon._gateway_wal.processed_up_to == 2)
+        await daemon.disconnect()
+
+    asyncio.run(run())
+
+
 def test_live_then_history_records_both_arrivals_and_turns_once(tmp_path, monkeypatch):
     async def run():
         memu = FakeMemu()

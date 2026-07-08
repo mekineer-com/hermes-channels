@@ -675,20 +675,14 @@ class ChannelsDaemon:
             event._last_chunk_len = chunk_len  # type: ignore[attr-defined]
             self._pending_text_batches[key] = event
         else:
+            if self._is_history_live_text_copy(existing, event):
+                if isinstance(existing.raw_message, dict) and isinstance(event.raw_message, dict):
+                    self._merge_whatsapp_batch_metadata(existing.raw_message, event.raw_message)
+                return
             if event.text:
                 existing.text = f"{existing.text}\n{event.text}" if existing.text else event.text
             if isinstance(existing.raw_message, dict) and isinstance(event.raw_message, dict):
-                existing.raw_message["_wal_seqs"] = [
-                    *(existing.raw_message.get("_wal_seqs") or [existing.raw_message.get("wal_seq")]),
-                    event.raw_message.get("wal_seq"),
-                ]
-                existing.raw_message["_source_keys"] = [
-                    *(existing.raw_message.get("_source_keys") or [(
-                        existing.raw_message.get("chatId"),
-                        existing.raw_message.get("messageId"),
-                    )]),
-                    (event.raw_message.get("chatId"), event.raw_message.get("messageId")),
-                ]
+                self._merge_whatsapp_batch_metadata(existing.raw_message, event.raw_message)
             existing._last_chunk_len = chunk_len  # type: ignore[attr-defined]
             if event.media_urls:
                 existing.media_urls.extend(event.media_urls)
@@ -698,6 +692,31 @@ class ChannelsDaemon:
         if prior_task and not prior_task.done():
             prior_task.cancel()
         self._pending_text_batch_tasks[key] = asyncio.create_task(self._flush_text_batch(key))
+
+    def _is_history_live_text_copy(self, existing: MessageEvent, event: MessageEvent) -> bool:
+        existing_raw = existing.raw_message if isinstance(existing.raw_message, dict) else {}
+        event_raw = event.raw_message if isinstance(event.raw_message, dict) else {}
+        modes = {
+            self._bridge_delivery_mode(existing_raw),
+            self._bridge_delivery_mode(event_raw),
+        }
+        return (
+            modes == {"live", "persist_only"}
+            and str(existing_raw.get("chatId") or "") == str(event_raw.get("chatId") or "")
+            and str(existing_raw.get("senderId") or "") == str(event_raw.get("senderId") or "")
+            and str(existing.text or "").strip() == str(event.text or "").strip()
+        )
+
+    @staticmethod
+    def _merge_whatsapp_batch_metadata(existing_raw: dict[str, Any], event_raw: dict[str, Any]) -> None:
+        existing_raw["_wal_seqs"] = [
+            *(existing_raw.get("_wal_seqs") or [existing_raw.get("wal_seq")]),
+            event_raw.get("wal_seq"),
+        ]
+        existing_raw["_source_keys"] = [
+            *(existing_raw.get("_source_keys") or [(existing_raw.get("chatId"), existing_raw.get("messageId"))]),
+            (event_raw.get("chatId"), event_raw.get("messageId")),
+        ]
 
     async def _flush_text_batch(self, key: str) -> None:
         current_task = asyncio.current_task()
