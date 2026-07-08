@@ -1087,37 +1087,26 @@ def test_history_live_copies_do_not_merge_same_text(tmp_path, monkeypatch):
     asyncio.run(run())
 
 
-def test_discard_text_debounce_clears_active_source_key(tmp_path, monkeypatch):
-    async def run():
-        daemon = make_daemon(tmp_path, monkeypatch)
-        ev = history_event("hello", "discard-me", wal_seq=1)
-        key = build_session_key(ev.source)
-
-        daemon._mark_source_key_active(("123@lid", "discard-me"))
-        daemon._enqueue_text_event(ev)
-        daemon._discard_text_debounce(key)
-
-        assert ("123@lid", "discard-me") not in daemon._active_source_keys
-        await daemon.disconnect()
-
-    asyncio.run(run())
-
-
-def test_stale_session_heal_clears_pending_active_source_key(tmp_path, monkeypatch):
+def test_orphan_pending_clears_active_source_key(tmp_path, monkeypatch):
     async def run():
         daemon = make_daemon(tmp_path, monkeypatch)
         ev = event("pending", "pending-stale")
+        new = event("new", "new-after-stale")
         key = build_session_key(ev.source)
         done = asyncio.create_task(async_noop())
         await done
+        started = []
 
-        daemon._active_sessions[key] = asyncio.Event()
         daemon._session_tasks[key] = done
         daemon._pending_messages[key] = ev
         daemon._mark_source_key_active(("123@lid", "pending-stale"))
 
-        assert daemon._heal_stale_session_lock(key)
+        daemon._start_session_processing = lambda event, session_key: started.append((event, session_key)) or True
+        await daemon.handle_message(new)
+
         assert ("123@lid", "pending-stale") not in daemon._active_source_keys
+        assert key not in daemon._pending_messages
+        assert started == [(new, key)]
         await daemon.disconnect()
 
     asyncio.run(run())
@@ -1135,7 +1124,6 @@ def test_replaced_whatsapp_pending_marks_discarded_wal_processed(tmp_path, monke
         processed = []
         daemon._gateway_wal.mark_processed = processed.append
 
-        daemon._active_sessions[key] = asyncio.Event()
         daemon._session_tasks[key] = keep_busy
         daemon._pending_messages[key] = old
         daemon._mark_source_key_active(("123@lid", "old-pending"))
@@ -1183,9 +1171,8 @@ def test_second_event_during_active_turn_queues_without_second_task(tmp_path, mo
         await daemon.handle_message(first)
         await asyncio.to_thread(started.wait, 2)
 
-        assert session_key in daemon._active_sessions
         first_task = daemon._session_tasks[session_key]
-        assert first_task is not None
+        assert not first_task.done()
 
         second = event("second", "m2")
         second.raw_message["wal_seq"] = 2

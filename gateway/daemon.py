@@ -366,7 +366,7 @@ class ChannelsDaemon:
         self._poll_task: asyncio.Task | None = None
         self._drain_task: asyncio.Task | None = None
         self._background_tasks: set[asyncio.Task] = set()
-        self._active_sessions: dict[str, asyncio.Event] = {}
+        self._session_interrupts: dict[str, asyncio.Event] = {}
         self._pending_messages: dict[str, MessageEvent] = {}
         self._session_tasks: dict[str, asyncio.Task] = {}
         self._pending_text_batches: dict[str, MessageEvent] = {}
@@ -721,9 +721,7 @@ class ChannelsDaemon:
         if not event.source:
             return
         session_key = build_session_key(event.source)
-        if session_key in self._active_sessions:
-            self._heal_stale_session_lock(session_key)
-        if session_key in self._active_sessions:
+        if self._session_is_busy(session_key):
             old_pending = self._pending_messages.get(session_key)
             merge_pending_message_event(
                 self._pending_messages,
@@ -736,21 +734,21 @@ class ChannelsDaemon:
                 self._mark_event_wal_processed(old_pending)
                 self._clear_event_source_keys(old_pending)
             return
+        self._drop_orphan_pending(session_key)
         self._start_session_processing(event, session_key)
 
     def _start_session_processing(self, event: MessageEvent, session_key: str) -> bool:
-        guard = asyncio.Event()
-        self._active_sessions[session_key] = guard
+        interrupt_event = asyncio.Event()
+        self._session_interrupts[session_key] = interrupt_event
         task = asyncio.create_task(self._process_message_background(event, session_key))
         self._session_tasks[session_key] = task
         self._background_tasks.add(task)
         task.add_done_callback(self._background_tasks.discard)
-        task.add_done_callback(lambda _task: self._session_tasks.pop(session_key, None) if self._session_tasks.get(session_key) is _task else None)
         return True
 
     async def _process_message_background(self, event: MessageEvent, session_key: str) -> None:
-        interrupt_event = self._active_sessions.get(session_key) or asyncio.Event()
-        self._active_sessions[session_key] = interrupt_event
+        interrupt_event = self._session_interrupts.get(session_key) or asyncio.Event()
+        self._session_interrupts[session_key] = interrupt_event
         typing_task = asyncio.create_task(self._keep_typing(event.source.chat_id, stop_event=interrupt_event))
         outcome = ProcessingOutcome.FAILURE
         try:
@@ -768,9 +766,7 @@ class ChannelsDaemon:
 
             if session_key in self._pending_messages:
                 pending_event = self._pending_messages.pop(session_key)
-                active = self._active_sessions.get(session_key)
-                if active is not None:
-                    active.clear()
+                interrupt_event.clear()
                 await self._stop_typing_task(typing_task)
                 drain_task = asyncio.create_task(self._process_message_background(pending_event, session_key))
                 self._session_tasks[session_key] = drain_task
@@ -814,9 +810,7 @@ class ChannelsDaemon:
                     # a second concurrent _process_message_background for the same key.
                     self._pending_messages[session_key] = late_pending
                 else:
-                    active = self._active_sessions.get(session_key)
-                    if active is not None:
-                        active.clear()
+                    interrupt_event.clear()
                     drain_task = asyncio.create_task(self._process_message_background(late_pending, session_key))
                     self._session_tasks[session_key] = drain_task
                     try:
@@ -829,7 +823,8 @@ class ChannelsDaemon:
                 current_task = asyncio.current_task()
                 if current_task is not None and self._session_tasks.get(session_key) is current_task:
                     del self._session_tasks[session_key]
-                    self._release_session_guard(session_key, guard=interrupt_event)
+                    if self._session_interrupts.get(session_key) is interrupt_event:
+                        del self._session_interrupts[session_key]
 
     async def _handle_turn(self, event: MessageEvent, session_key: str) -> str:
         source = event.source
@@ -1625,54 +1620,18 @@ class ChannelsDaemon:
             content=content,
         )
 
-    def _session_task_is_stale(self, session_key: str) -> bool:
-        """Return True if the owner task for ``session_key`` is done/cancelled.
-
-        A lock is "stale" when the daemon still has ``_active_sessions[key]``
-        AND a known owner task in ``_session_tasks`` that has already exited.
-        When there is no owner task at all, don't treat that as stale.
-        """
+    def _session_is_busy(self, session_key: str) -> bool:
         task = self._session_tasks.get(session_key)
-        if task is None:
-            return False
-        done = getattr(task, "done", None)
-        return bool(done and done())
+        return bool(task and not task.done())
 
-    def _heal_stale_session_lock(self, session_key: str) -> bool:
-        """Clear a stale session lock if the owner task is already gone.
-
-        Returns True if a stale lock was healed.  Returns False if there is
-        no lock, or the owner task is still alive (the normal busy case).
-        """
-        if session_key not in self._active_sessions:
-            return False
-        if not self._session_task_is_stale(session_key):
-            return False
-        logger.warning("[whatsapp] Healing stale session lock for %s (owner task is done/absent)", session_key)
-        self._active_sessions.pop(session_key, None)
+    def _drop_orphan_pending(self, session_key: str) -> None:
         pending_event = self._pending_messages.pop(session_key, None)
         if pending_event is not None:
+            logger.warning(
+                "[whatsapp] Dropping orphaned pending message for %s (abnormal task exit)",
+                session_key,
+            )
             self._clear_event_source_keys(pending_event)
-        self._session_tasks.pop(session_key, None)
-        self._discard_text_debounce(session_key)
-        return True
-
-    def _discard_text_debounce(self, session_key: str) -> None:
-        """Cancel and drop pending text debounce state for control commands."""
-        task = self._pending_text_batch_tasks.pop(session_key, None)
-        if task is not None and not task.done():
-            task.cancel()
-        event = self._pending_text_batches.pop(session_key, None)
-        if event is not None:
-            self._clear_event_source_keys(event)
-
-    def _release_session_guard(self, session_key: str, *, guard: asyncio.Event | None = None) -> None:
-        current_guard = self._active_sessions.get(session_key)
-        if current_guard is None:
-            return
-        if guard is not None and current_guard is not guard:
-            return
-        del self._active_sessions[session_key]
 
     async def _stop_typing_task(self, typing_task: asyncio.Task) -> None:
         if not typing_task.done():
