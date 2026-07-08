@@ -733,6 +733,7 @@ class ChannelsDaemon:
             )
             new_pending = self._pending_messages.get(session_key)
             if old_pending is not None and old_pending is not new_pending:
+                self._mark_event_wal_processed(old_pending)
                 self._clear_event_source_keys(old_pending)
             return
         self._start_session_processing(event, session_key)
@@ -1528,7 +1529,8 @@ class ChannelsDaemon:
         return source_chat_id, source_message_id
 
     def _record_whatsapp_arrival_raw(self, raw: dict[str, Any]) -> None:
-        if self._bridge_delivery_mode(raw) not in {"live", "persist_only"}:
+        delivery_mode = self._bridge_delivery_mode(raw)
+        if delivery_mode not in {"live", "persist_only"}:
             return
         chat_id = str(raw.get("chatId") or "").strip().lower()
         if not chat_id or chat_id == "status@broadcast" or chat_id.endswith("@newsletter"):
@@ -1539,7 +1541,7 @@ class ChannelsDaemon:
         self._db.record_whatsapp_arrival(
             source_chat_id=source_key[0],
             source_message_id=source_key[1],
-            mode=self._bridge_delivery_mode(raw),
+            mode=delivery_mode,
         )
 
     def _source_key_is_active(self, source_key: tuple[str, str] | None) -> bool:
@@ -1559,6 +1561,12 @@ class ChannelsDaemon:
     def _clear_event_source_keys(self, event: MessageEvent) -> None:
         raw = event.raw_message if isinstance(event.raw_message, dict) else {}
         self._clear_source_keys(raw.get("_source_keys") or [(raw.get("chatId"), raw.get("messageId"))])
+
+    def _mark_event_wal_processed(self, event: MessageEvent) -> None:
+        raw = event.raw_message if isinstance(event.raw_message, dict) else {}
+        for wal_seq in raw.get("_wal_seqs") or [raw.get("wal_seq")]:
+            if wal_seq is not None:
+                self._gateway_wal.mark_processed(wal_seq)
 
     def _history_event_can_trigger_turn(self, event: MessageEvent) -> bool:
         raw = event.raw_message if isinstance(event.raw_message, dict) else {}
@@ -1642,7 +1650,9 @@ class ChannelsDaemon:
             return False
         logger.warning("[whatsapp] Healing stale session lock for %s (owner task is done/absent)", session_key)
         self._active_sessions.pop(session_key, None)
-        self._pending_messages.pop(session_key, None)
+        pending_event = self._pending_messages.pop(session_key, None)
+        if pending_event is not None:
+            self._clear_event_source_keys(pending_event)
         self._session_tasks.pop(session_key, None)
         self._discard_text_debounce(session_key)
         return True

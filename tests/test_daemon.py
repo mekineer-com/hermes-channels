@@ -106,6 +106,20 @@ def history_event(text="hello", message_id="m1", *, wal_seq=1):
     return ev
 
 
+async def wait_for_turns(memu, count, *, timeout=1.0):
+    await wait_until(lambda: len(memu.turn_calls) >= count, timeout=timeout)
+
+
+async def wait_until(predicate, *, timeout=1.0):
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while loop.time() < deadline:
+        if predicate():
+            return
+        await asyncio.sleep(0.005)
+    assert predicate()
+
+
 def test_batching_debounce_flushes_merged_text(tmp_path, monkeypatch):
     async def run():
         daemon = make_daemon(tmp_path, monkeypatch)
@@ -887,10 +901,11 @@ def test_history_arrival_can_trigger_turn_once(tmp_path, monkeypatch):
         daemon.send = lambda *_args, **_kwargs: asyncio.sleep(0, result=SendResult(True, "sent-1"))
 
         await daemon._dispatch_built_message_event(history_event("hello", "hist-1"))
-        await asyncio.sleep(0.05)
+        await wait_for_turns(memu, 1)
 
         assert len(memu.turn_calls) == 1
         assert memu.turn_calls[0]["message"] == "hello"
+        await wait_until(lambda: daemon._gateway_wal.processed_up_to == 1)
         assert daemon._gateway_wal.processed_up_to == 1
         assert daemon._db.message_source_key_is_processed(source_chat_id="123@lid", source_message_id="hist-1")
         await daemon.disconnect()
@@ -912,10 +927,11 @@ def test_history_then_live_records_both_arrivals_and_turns_once(tmp_path, monkey
         await daemon._dispatch_built_message_event(hist)
         daemon._record_whatsapp_arrival_raw(live.raw_message)
         await daemon._dispatch_built_message_event(live)
-        await asyncio.sleep(0.05)
+        await wait_for_turns(memu, 1)
 
         assert len(memu.turn_calls) == 1
         assert memu.turn_calls[0]["message"] == "hello"
+        await wait_until(lambda: daemon._gateway_wal.processed_up_to == 2)
         assert daemon._gateway_wal.processed_up_to == 2
         row = daemon._db.get_whatsapp_arrival("123@lid", "same-1")
         assert row["seen_history_at"] is not None
@@ -939,9 +955,10 @@ def test_live_then_history_records_both_arrivals_and_turns_once(tmp_path, monkey
         await daemon._dispatch_built_message_event(live)
         daemon._record_whatsapp_arrival_raw(hist.raw_message)
         await daemon._dispatch_built_message_event(hist)
-        await asyncio.sleep(0.05)
+        await wait_for_turns(memu, 1)
 
         assert len(memu.turn_calls) == 1
+        await wait_until(lambda: daemon._gateway_wal.processed_up_to == 2)
         assert daemon._gateway_wal.processed_up_to == 2
         row = daemon._db.get_whatsapp_arrival("123@lid", "same-2")
         assert row["seen_history_at"] is not None
@@ -988,10 +1005,30 @@ def test_history_recovery_ignores_live_max_age_gate(tmp_path, monkeypatch):
         hist.raw_message["timestamp"] = time.time() - (daemon.settings.max_message_age_seconds + 100)
 
         await daemon._dispatch_built_message_event(hist)
-        await asyncio.sleep(0.05)
+        await wait_for_turns(memu, 1)
 
         assert len(memu.turn_calls) == 1
         assert memu.turn_calls[0]["message"] == "old but recoverable"
+        await daemon.disconnect()
+
+    asyncio.run(run())
+
+
+def test_history_before_active_since_records_arrival_without_turn(tmp_path, monkeypatch):
+    async def run():
+        memu = FakeMemu()
+        daemon = make_daemon(tmp_path, monkeypatch, memu)
+        with sqlite3.connect(tmp_path / "state.db") as conn:
+            conn.execute("INSERT INTO souls(soul_id, active_since) VALUES(?, ?)", ("soul", 1000.0))
+        hist = history_event("too old", "before-active", wal_seq=1)
+        hist.raw_message["timestamp"] = 500
+
+        daemon._record_whatsapp_arrival_raw(hist.raw_message)
+        await daemon._dispatch_built_message_event(hist)
+        await asyncio.sleep(0)
+
+        assert memu.turn_calls == []
+        assert daemon._db.get_whatsapp_arrival("123@lid", "before-active") is not None
         await daemon.disconnect()
 
     asyncio.run(run())
@@ -1017,10 +1054,11 @@ def test_replayed_history_arrival_still_processes_if_not_handled(tmp_path, monke
         )
 
         await daemon._replay_gateway_wal()
-        await asyncio.sleep(0.05)
+        await wait_for_turns(memu, 1)
 
         assert len(memu.turn_calls) == 1
         assert memu.turn_calls[0]["message"] == "after crash"
+        await wait_until(lambda: daemon._gateway_wal.processed_up_to == 1)
         assert daemon._gateway_wal.processed_up_to == 1
         await daemon.disconnect()
 
@@ -1040,7 +1078,7 @@ def test_history_live_copies_do_not_merge_same_text(tmp_path, monkeypatch):
         live.raw_message["wal_seq"] = 2
         await daemon._dispatch_built_message_event(hist)
         await daemon._dispatch_built_message_event(live)
-        await asyncio.sleep(0.08)
+        await wait_for_turns(memu, 1)
 
         assert len(memu.turn_calls) == 1
         assert memu.turn_calls[0]["message"] == "hello"
@@ -1060,6 +1098,55 @@ def test_discard_text_debounce_clears_active_source_key(tmp_path, monkeypatch):
         daemon._discard_text_debounce(key)
 
         assert ("123@lid", "discard-me") not in daemon._active_source_keys
+        await daemon.disconnect()
+
+    asyncio.run(run())
+
+
+def test_stale_session_heal_clears_pending_active_source_key(tmp_path, monkeypatch):
+    async def run():
+        daemon = make_daemon(tmp_path, monkeypatch)
+        ev = event("pending", "pending-stale")
+        key = build_session_key(ev.source)
+        done = asyncio.create_task(async_noop())
+        await done
+
+        daemon._active_sessions[key] = asyncio.Event()
+        daemon._session_tasks[key] = done
+        daemon._pending_messages[key] = ev
+        daemon._mark_source_key_active(("123@lid", "pending-stale"))
+
+        assert daemon._heal_stale_session_lock(key)
+        assert ("123@lid", "pending-stale") not in daemon._active_source_keys
+        await daemon.disconnect()
+
+    asyncio.run(run())
+
+
+def test_replaced_whatsapp_pending_marks_discarded_wal_processed(tmp_path, monkeypatch):
+    async def run():
+        daemon = make_daemon(tmp_path, monkeypatch)
+        old = event("old", "old-pending")
+        old.raw_message["wal_seq"] = 10
+        new = event("new", "new-pending")
+        new.raw_message["wal_seq"] = 11
+        key = build_session_key(old.source)
+        keep_busy = asyncio.create_task(asyncio.sleep(10))
+        processed = []
+        daemon._gateway_wal.mark_processed = processed.append
+
+        daemon._active_sessions[key] = asyncio.Event()
+        daemon._session_tasks[key] = keep_busy
+        daemon._pending_messages[key] = old
+        daemon._mark_source_key_active(("123@lid", "old-pending"))
+
+        await daemon.handle_message(new)
+
+        assert processed == [10]
+        assert daemon._pending_messages[key] is new
+        assert ("123@lid", "old-pending") not in daemon._active_source_keys
+        keep_busy.cancel()
+        await asyncio.gather(keep_busy, return_exceptions=True)
         await daemon.disconnect()
 
     asyncio.run(run())
