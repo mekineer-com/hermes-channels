@@ -44,3 +44,19 @@ def test_append_message_duplicate_source_key_returns_existing_id(tmp_path):
     assert len(rows) == 1
     assert rows[0]["content"] == "hello"
     db.close()
+
+
+def test_whatsapp_arrival_records_history_and_live_without_processing(tmp_path):
+    db = ChannelsStateDB(tmp_path / "state.db")
+
+    assert db.record_whatsapp_arrival("chat@lid", "m1", "persist_only", seen_at=10)
+    assert not db.record_whatsapp_arrival("chat@lid", "m1", "persist_only", seen_at=20)
+    assert db.record_whatsapp_arrival("chat@lid", "m1", "live", seen_at=30)
+    assert not db.record_whatsapp_arrival("chat@lid", "m1", "live", seen_at=40)
+
+    row = db.get_whatsapp_arrival("chat@lid", "m1")
+    assert row["seen_history_at"] == 10
+    assert row["seen_live_at"] == 30
+    assert row["first_seen_mode"] == "persist_only"
+    assert not db.message_source_key_is_processed(source_chat_id="chat@lid", source_message_id="m1")
+    db.close()

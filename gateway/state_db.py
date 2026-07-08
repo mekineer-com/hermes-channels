@@ -95,6 +95,15 @@ CREATE TABLE IF NOT EXISTS processed_source_keys (
     PRIMARY KEY (source_chat_id, source_message_id)
 );
 
+CREATE TABLE IF NOT EXISTS whatsapp_message_arrivals (
+    source_chat_id TEXT NOT NULL,
+    source_message_id TEXT NOT NULL,
+    seen_history_at REAL,
+    seen_live_at REAL,
+    first_seen_mode TEXT,
+    PRIMARY KEY (source_chat_id, source_message_id)
+);
+
 CREATE TABLE IF NOT EXISTS souls (
     soul_id TEXT PRIMARY KEY,
     active_since REAL NOT NULL
@@ -361,6 +370,70 @@ class ChannelsStateDB:
             return bool(cursor.rowcount)
 
         return bool(self._execute_write(_do))
+
+    def record_whatsapp_arrival(
+        self,
+        source_chat_id: str,
+        source_message_id: str,
+        mode: str,
+        seen_at: Any = None,
+    ) -> bool:
+        chat_key = str(source_chat_id or "").strip()
+        message_key = str(source_message_id or "").strip()
+        arrival_mode = str(mode or "").strip().lower()
+        if not chat_key or not message_key or arrival_mode not in {"live", "persist_only"}:
+            return False
+
+        seen_ts = _coerce_message_timestamp(seen_at)
+        if seen_ts is None:
+            seen_ts = time.time()
+        column = "seen_live_at" if arrival_mode == "live" else "seen_history_at"
+
+        def _do(conn):
+            insert_cursor = conn.execute(
+                f"""
+                INSERT OR IGNORE INTO whatsapp_message_arrivals(
+                    source_chat_id,
+                    source_message_id,
+                    {column},
+                    first_seen_mode
+                ) VALUES (?, ?, ?, ?)
+                """,
+                (chat_key, message_key, seen_ts, arrival_mode),
+            )
+            if insert_cursor.rowcount:
+                return True
+            cursor = conn.execute(
+                f"""
+                UPDATE whatsapp_message_arrivals
+                   SET {column} = ?
+                 WHERE source_chat_id = ?
+                   AND source_message_id = ?
+                   AND {column} IS NULL
+                """,
+                (seen_ts, chat_key, message_key),
+            )
+            return bool(cursor.rowcount)
+
+        return bool(self._execute_write(_do))
+
+    def get_whatsapp_arrival(self, source_chat_id: str, source_message_id: str) -> dict[str, Any] | None:
+        chat_key = str(source_chat_id or "").strip()
+        message_key = str(source_message_id or "").strip()
+        if not chat_key or not message_key:
+            return None
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT source_chat_id, source_message_id, seen_history_at, seen_live_at, first_seen_mode
+                  FROM whatsapp_message_arrivals
+                 WHERE source_chat_id = ?
+                   AND source_message_id = ?
+                 LIMIT 1
+                """,
+                (chat_key, message_key),
+            ).fetchone()
+        return dict(row) if row else None
 
     def message_source_key_has_response(
         self,

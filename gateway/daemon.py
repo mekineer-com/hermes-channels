@@ -371,6 +371,7 @@ class ChannelsDaemon:
         self._session_tasks: dict[str, asyncio.Task] = {}
         self._pending_text_batches: dict[str, MessageEvent] = {}
         self._pending_text_batch_tasks: dict[str, asyncio.Task] = {}
+        self._active_source_keys: set[tuple[str, str]] = set()
         self._gateway_wal = WhatsAppGatewayWal(
             wal_path=self.whatsapp_home / "gateway_wal.jsonl",
             offset_path=self.whatsapp_home / "gateway_wal.offset",
@@ -585,6 +586,7 @@ class ChannelsDaemon:
                         if not isinstance(msg_data, dict):
                             continue
                         wal_row = wal.append(msg_data)
+                        self._record_whatsapp_arrival_raw(msg_data)
                         if wal_row is None:
                             if msg_data.get("seq") is None:
                                 continue
@@ -619,6 +621,7 @@ class ChannelsDaemon:
     async def _dispatch_built_message_event(self, event: MessageEvent) -> None:
         raw = event.raw_message if isinstance(event.raw_message, dict) else {}
         delivery_mode = self._bridge_delivery_mode(raw)
+        source_key = self._whatsapp_source_key(raw)
         if delivery_mode == "live" and self.settings.max_message_age_seconds > 0:
             timestamp = _coerce_gateway_timestamp(raw.get("timestamp"))
             if timestamp is not None:
@@ -635,9 +638,10 @@ class ChannelsDaemon:
                         self._gateway_wal.mark_processed(wal_seq)
                     return
         if delivery_mode == "live":
-            if self._is_duplicate_source_message(raw):
+            if self._source_key_is_active(source_key) or self._is_duplicate_source_message(raw):
                 self._gateway_wal.mark_processed(raw.get("wal_seq"))
                 return
+            self._mark_source_key_active(source_key)
             if event.message_type == MessageType.TEXT:
                 self._enqueue_text_event(event)
             else:
@@ -649,6 +653,16 @@ class ChannelsDaemon:
         if delivery_mode == "revoke":
             self._apply_whatsapp_revoke(event.source, raw)
             self._gateway_wal.mark_processed(wal_seq)
+            return
+        if self._history_event_can_trigger_turn(event):
+            if self._source_key_is_active(source_key):
+                self._gateway_wal.mark_processed(wal_seq)
+                return
+            self._mark_source_key_active(source_key)
+            if event.message_type == MessageType.TEXT:
+                self._enqueue_text_event(event)
+            else:
+                await self.handle_message(event)
             return
         self._persist_history_event(event)
         self._gateway_wal.mark_processed(wal_seq)
@@ -710,12 +724,16 @@ class ChannelsDaemon:
         if session_key in self._active_sessions:
             self._heal_stale_session_lock(session_key)
         if session_key in self._active_sessions:
+            old_pending = self._pending_messages.get(session_key)
             merge_pending_message_event(
                 self._pending_messages,
                 session_key,
                 event,
                 merge_text=event.message_type == MessageType.TEXT,
             )
+            new_pending = self._pending_messages.get(session_key)
+            if old_pending is not None and old_pending is not new_pending:
+                self._clear_event_source_keys(old_pending)
             return
         self._start_session_processing(event, session_key)
 
@@ -927,9 +945,10 @@ class ChannelsDaemon:
             raise ValueError("WhatsApp WAL invariant break: missing wal_seq on processing completion")
         for wal_seq in wal_seqs:
             self._gateway_wal.mark_processed(wal_seq)
-        if outcome != ProcessingOutcome.SUCCESS:
-            return
         source_keys = raw.get("_source_keys") or [(raw.get("chatId"), raw.get("messageId"))]
+        if outcome != ProcessingOutcome.SUCCESS:
+            self._clear_source_keys(source_keys)
+            return
         for chat_id, message_id in source_keys:
             chat_key = str(chat_id or "").strip()
             message_key = str(message_id or "").strip()
@@ -938,6 +957,7 @@ class ChannelsDaemon:
                     source_chat_id=chat_key,
                     source_message_id=message_key,
                 )
+        self._clear_source_keys(source_keys)
 
     async def _replay_gateway_wal(self) -> None:
         wal = self._gateway_wal
@@ -946,6 +966,7 @@ class ChannelsDaemon:
             event_data = row.get("event")
             if not isinstance(event_data, dict):
                 raise ValueError(f"Invalid WhatsApp WAL row payload at wal_seq={wal_seq!r}")
+            self._record_whatsapp_arrival_raw(event_data)
             self._update_contact_store_from_event(event_data, source="gateway_wal_replay")
             event = await self._build_message_event(event_data)
             if event:
@@ -1497,6 +1518,63 @@ class ChannelsDaemon:
             return True
         logger.warning("Soul %s not routed (self_dm=%r); silent exit for %s", notice_kind, self_dm, conversation_id)
         return False
+
+    @staticmethod
+    def _whatsapp_source_key(raw: dict[str, Any]) -> tuple[str, str] | None:
+        source_chat_id = str(raw.get("chatId") or "").strip()
+        source_message_id = str(raw.get("messageId") or "").strip()
+        if not source_chat_id or not source_message_id:
+            return None
+        return source_chat_id, source_message_id
+
+    def _record_whatsapp_arrival_raw(self, raw: dict[str, Any]) -> None:
+        if self._bridge_delivery_mode(raw) not in {"live", "persist_only"}:
+            return
+        chat_id = str(raw.get("chatId") or "").strip().lower()
+        if not chat_id or chat_id == "status@broadcast" or chat_id.endswith("@newsletter"):
+            return
+        source_key = self._whatsapp_source_key(raw)
+        if source_key is None:
+            return
+        self._db.record_whatsapp_arrival(
+            source_chat_id=source_key[0],
+            source_message_id=source_key[1],
+            mode=self._bridge_delivery_mode(raw),
+        )
+
+    def _source_key_is_active(self, source_key: tuple[str, str] | None) -> bool:
+        return bool(source_key and source_key in self._active_source_keys)
+
+    def _mark_source_key_active(self, source_key: tuple[str, str] | None) -> None:
+        if source_key:
+            self._active_source_keys.add(source_key)
+
+    def _clear_source_keys(self, source_keys: Any) -> None:
+        for chat_id, message_id in source_keys or []:
+            chat_key = str(chat_id or "").strip()
+            message_key = str(message_id or "").strip()
+            if chat_key and message_key:
+                self._active_source_keys.discard((chat_key, message_key))
+
+    def _clear_event_source_keys(self, event: MessageEvent) -> None:
+        raw = event.raw_message if isinstance(event.raw_message, dict) else {}
+        self._clear_source_keys(raw.get("_source_keys") or [(raw.get("chatId"), raw.get("messageId"))])
+
+    def _history_event_can_trigger_turn(self, event: MessageEvent) -> bool:
+        raw = event.raw_message if isinstance(event.raw_message, dict) else {}
+        if not self._whatsapp_source_key(raw):
+            return False
+        if raw.get("fromMe") or str(raw.get("speakerRoleHint") or "").strip().lower() == "assistant":
+            return False
+        if not str(event.text or "").strip() and not raw.get("hasMedia"):
+            return False
+        message_timestamp = _coerce_gateway_timestamp(raw.get("timestamp"))
+        if message_timestamp is None:
+            return False
+        active_since = self._db.get_soul_active_since(self.settings.soul_id)
+        if active_since is not None and message_timestamp < active_since:
+            return False
+        return not self._is_duplicate_source_message(raw)
 
     def _is_duplicate_source_message(self, raw: dict[str, Any]) -> bool:
         source_chat_id = str(raw.get("chatId") or "").strip()

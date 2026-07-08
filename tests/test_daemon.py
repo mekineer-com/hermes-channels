@@ -97,6 +97,15 @@ def event(text="hello", message_id="m1"):
     )
 
 
+def history_event(text="hello", message_id="m1", *, wal_seq=1):
+    ev = event(text, message_id)
+    ev.raw_message["deliveryMode"] = "persist_only"
+    ev.raw_message["timestamp"] = time.time()
+    ev.raw_message["wal_seq"] = wal_seq
+    ev.internal = True
+    return ev
+
+
 def test_batching_debounce_flushes_merged_text(tmp_path, monkeypatch):
     async def run():
         daemon = make_daemon(tmp_path, monkeypatch)
@@ -866,6 +875,175 @@ def test_replay_gateway_wal_redispatches_pending_and_marks_non_message_processed
 
         assert dispatched == ["pic"]
         assert daemon._gateway_wal.processed_up_to == 2
+        await daemon.disconnect()
+
+    asyncio.run(run())
+
+
+def test_history_arrival_can_trigger_turn_once(tmp_path, monkeypatch):
+    async def run():
+        memu = FakeMemu()
+        daemon = make_daemon(tmp_path, monkeypatch, memu)
+        daemon.send = lambda *_args, **_kwargs: asyncio.sleep(0, result=SendResult(True, "sent-1"))
+
+        await daemon._dispatch_built_message_event(history_event("hello", "hist-1"))
+        await asyncio.sleep(0.05)
+
+        assert len(memu.turn_calls) == 1
+        assert memu.turn_calls[0]["message"] == "hello"
+        assert daemon._gateway_wal.processed_up_to == 1
+        assert daemon._db.message_source_key_is_processed(source_chat_id="123@lid", source_message_id="hist-1")
+        await daemon.disconnect()
+
+    asyncio.run(run())
+
+
+def test_history_then_live_records_both_arrivals_and_turns_once(tmp_path, monkeypatch):
+    async def run():
+        memu = FakeMemu()
+        daemon = make_daemon(tmp_path, monkeypatch, memu)
+        daemon.send = lambda *_args, **_kwargs: asyncio.sleep(0, result=SendResult(True, "sent-1"))
+
+        hist = history_event("hello", "same-1", wal_seq=1)
+        live = event("hello", "same-1")
+        live.raw_message["timestamp"] = time.time()
+        live.raw_message["wal_seq"] = 2
+        daemon._record_whatsapp_arrival_raw(hist.raw_message)
+        await daemon._dispatch_built_message_event(hist)
+        daemon._record_whatsapp_arrival_raw(live.raw_message)
+        await daemon._dispatch_built_message_event(live)
+        await asyncio.sleep(0.05)
+
+        assert len(memu.turn_calls) == 1
+        assert memu.turn_calls[0]["message"] == "hello"
+        assert daemon._gateway_wal.processed_up_to == 2
+        row = daemon._db.get_whatsapp_arrival("123@lid", "same-1")
+        assert row["seen_history_at"] is not None
+        assert row["seen_live_at"] is not None
+        await daemon.disconnect()
+
+    asyncio.run(run())
+
+
+def test_live_then_history_records_both_arrivals_and_turns_once(tmp_path, monkeypatch):
+    async def run():
+        memu = FakeMemu()
+        daemon = make_daemon(tmp_path, monkeypatch, memu)
+        daemon.send = lambda *_args, **_kwargs: asyncio.sleep(0, result=SendResult(True, "sent-1"))
+
+        live = event("hello", "same-2")
+        live.raw_message["timestamp"] = time.time()
+        live.raw_message["wal_seq"] = 1
+        hist = history_event("hello", "same-2", wal_seq=2)
+        daemon._record_whatsapp_arrival_raw(live.raw_message)
+        await daemon._dispatch_built_message_event(live)
+        daemon._record_whatsapp_arrival_raw(hist.raw_message)
+        await daemon._dispatch_built_message_event(hist)
+        await asyncio.sleep(0.05)
+
+        assert len(memu.turn_calls) == 1
+        assert daemon._gateway_wal.processed_up_to == 2
+        row = daemon._db.get_whatsapp_arrival("123@lid", "same-2")
+        assert row["seen_history_at"] is not None
+        assert row["seen_live_at"] is not None
+        await daemon.disconnect()
+
+    asyncio.run(run())
+
+
+def test_from_me_and_empty_history_record_arrival_without_turn(tmp_path, monkeypatch):
+    async def run():
+        memu = FakeMemu()
+        daemon = make_daemon(tmp_path, monkeypatch, memu)
+
+        from_me = history_event("sent by me", "from-me", wal_seq=1)
+        from_me.raw_message["fromMe"] = True
+        assistant = history_event("soul said it", "assistant-row", wal_seq=2)
+        assistant.raw_message["speakerRoleHint"] = "assistant"
+        empty = history_event("", "empty", wal_seq=3)
+        daemon._record_whatsapp_arrival_raw(from_me.raw_message)
+        await daemon._dispatch_built_message_event(from_me)
+        daemon._record_whatsapp_arrival_raw(assistant.raw_message)
+        await daemon._dispatch_built_message_event(assistant)
+        daemon._record_whatsapp_arrival_raw(empty.raw_message)
+        built = await daemon._build_message_event(empty.raw_message)
+        if built:
+            await daemon._dispatch_built_message_event(built)
+
+        assert memu.turn_calls == []
+        assert daemon._db.get_whatsapp_arrival("123@lid", "from-me") is not None
+        assert daemon._db.get_whatsapp_arrival("123@lid", "assistant-row") is not None
+        assert daemon._db.get_whatsapp_arrival("123@lid", "empty") is not None
+        await daemon.disconnect()
+
+    asyncio.run(run())
+
+
+def test_history_recovery_ignores_live_max_age_gate(tmp_path, monkeypatch):
+    async def run():
+        memu = FakeMemu()
+        daemon = make_daemon(tmp_path, monkeypatch, memu)
+        daemon.send = lambda *_args, **_kwargs: asyncio.sleep(0, result=SendResult(True, "sent-1"))
+        hist = history_event("old but recoverable", "old-history", wal_seq=1)
+        hist.raw_message["timestamp"] = time.time() - (daemon.settings.max_message_age_seconds + 100)
+
+        await daemon._dispatch_built_message_event(hist)
+        await asyncio.sleep(0.05)
+
+        assert len(memu.turn_calls) == 1
+        assert memu.turn_calls[0]["message"] == "old but recoverable"
+        await daemon.disconnect()
+
+    asyncio.run(run())
+
+
+def test_replayed_history_arrival_still_processes_if_not_handled(tmp_path, monkeypatch):
+    async def run():
+        memu = FakeMemu()
+        daemon = make_daemon(tmp_path, monkeypatch, memu)
+        daemon.send = lambda *_args, **_kwargs: asyncio.sleep(0, result=SendResult(True, "sent-1"))
+        daemon._db.record_whatsapp_arrival("123@lid", "replay-1", "persist_only", seen_at=time.time())
+        daemon._gateway_wal.append(
+            {
+                "seq": 10,
+                "chatId": "123@lid",
+                "messageId": "replay-1",
+                "senderId": "123@lid",
+                "senderName": "Ada",
+                "body": "after crash",
+                "deliveryMode": "persist_only",
+                "timestamp": time.time(),
+            }
+        )
+
+        await daemon._replay_gateway_wal()
+        await asyncio.sleep(0.05)
+
+        assert len(memu.turn_calls) == 1
+        assert memu.turn_calls[0]["message"] == "after crash"
+        assert daemon._gateway_wal.processed_up_to == 1
+        await daemon.disconnect()
+
+    asyncio.run(run())
+
+
+def test_history_live_copies_do_not_merge_same_text(tmp_path, monkeypatch):
+    async def run():
+        memu = FakeMemu()
+        daemon = make_daemon(tmp_path, monkeypatch, memu)
+        daemon.settings.text_batch_delay_seconds = 0.04
+        daemon.send = lambda *_args, **_kwargs: asyncio.sleep(0, result=SendResult(True, "sent-1"))
+
+        hist = history_event("hello", "same-3", wal_seq=1)
+        live = event("hello", "same-3")
+        live.raw_message["timestamp"] = time.time()
+        live.raw_message["wal_seq"] = 2
+        await daemon._dispatch_built_message_event(hist)
+        await daemon._dispatch_built_message_event(live)
+        await asyncio.sleep(0.08)
+
+        assert len(memu.turn_calls) == 1
+        assert memu.turn_calls[0]["message"] == "hello"
         await daemon.disconnect()
 
     asyncio.run(run())
