@@ -291,8 +291,8 @@ async function startSocket() {
         logger.debug({ event: 'getMessage_hit_id_fallback', key }, 'retry served from cache via id-only match');
         return fallbackEntry;
       }
-      logger.warn({ event: 'getMessage_miss_placeholder', remoteJid: key.remoteJid, id: key.id, fromMe: key.fromMe }, 'retry key not in cache; serving placeholder so Baileys can complete retry handshake');
-      return { conversation: '' };
+      logger.error({ event: 'getMessage_miss', remoteJid: key.remoteJid, id: key.id, fromMe: key.fromMe }, 'retry key not in cache; Baileys will skip re-delivery');
+      return undefined;
     },
   });
 
