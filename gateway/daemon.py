@@ -1652,7 +1652,9 @@ class ChannelsDaemon:
         task = self._pending_text_batch_tasks.pop(session_key, None)
         if task is not None and not task.done():
             task.cancel()
-        self._pending_text_batches.pop(session_key, None)
+        event = self._pending_text_batches.pop(session_key, None)
+        if event is not None:
+            self._clear_event_source_keys(event)
 
     def _release_session_guard(self, session_key: str, *, guard: asyncio.Event | None = None) -> None:
         current_guard = self._active_sessions.get(session_key)

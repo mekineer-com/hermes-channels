@@ -1049,6 +1049,22 @@ def test_history_live_copies_do_not_merge_same_text(tmp_path, monkeypatch):
     asyncio.run(run())
 
 
+def test_discard_text_debounce_clears_active_source_key(tmp_path, monkeypatch):
+    async def run():
+        daemon = make_daemon(tmp_path, monkeypatch)
+        ev = history_event("hello", "discard-me", wal_seq=1)
+        key = build_session_key(ev.source)
+
+        daemon._mark_source_key_active(("123@lid", "discard-me"))
+        daemon._enqueue_text_event(ev)
+        daemon._discard_text_debounce(key)
+
+        assert ("123@lid", "discard-me") not in daemon._active_source_keys
+        await daemon.disconnect()
+
+    asyncio.run(run())
+
+
 # ---------------------------------------------------------------------------
 # T11: double-dispatch regression
 # ---------------------------------------------------------------------------
