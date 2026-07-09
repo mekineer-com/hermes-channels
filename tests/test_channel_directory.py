@@ -48,3 +48,42 @@ def test_directory_writer_output_shape(tmp_path, monkeypatch):
         {"id": "g@g.us", "name": "Group", "type": "group"},
     ]
     assert json.loads((tmp_path / "channel_directory.json").read_text()) == out
+
+
+def test_directory_writer_merges_phone_and_lid_sessions(tmp_path, monkeypatch):
+    monkeypatch.setenv("CHANNELS_HOME", str(tmp_path))
+    session_dir = tmp_path / "whatsapp" / "session"
+    session_dir.mkdir(parents=True)
+    (session_dir / "lid-mapping-15551234567.json").write_text(
+        json.dumps("999999999999999"),
+        encoding="utf-8",
+    )
+    sessions_path = tmp_path / "sessions" / "sessions.json"
+    sessions_path.parent.mkdir()
+    sessions_path.write_text(
+        json.dumps(
+            {
+                "current": {
+                    "origin": {
+                        "platform": "whatsapp",
+                        "chat_id": "15551234567@s.whatsapp.net",
+                        "chat_name": "Ada",
+                        "chat_type": "dm",
+                    }
+                },
+                "legacy": {
+                    "origin": {
+                        "platform": "whatsapp",
+                        "chat_id": "999999999999999@lid",
+                        "chat_name": "Ada",
+                        "chat_type": "dm",
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert write_channel_directory()["platforms"]["whatsapp"] == [
+        {"id": "999999999999999@lid", "name": "Ada", "type": "dm"},
+    ]

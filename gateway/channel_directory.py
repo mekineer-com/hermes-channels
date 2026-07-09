@@ -10,6 +10,7 @@ from typing import Any
 from gateway.home import channels_home
 from gateway.util import atomic_json_write
 from gateway.whatsapp_known_contacts import is_placeholder_whatsapp_name
+from gateway.whatsapp_seam import canonical_whatsapp_jid
 
 
 def write_channel_directory(
@@ -73,6 +74,7 @@ def _whatsapp_sessions(path: Path) -> list[dict[str, str]]:
         chat_id = str(origin.get("chat_id") or "").strip()
         if not chat_id:
             continue
+        chat_id = canonical_whatsapp_jid(chat_id) or chat_id
         name = str(origin.get("chat_name") or origin.get("user_name") or chat_id).strip()
         rows.append({"id": chat_id, "name": name, "type": str(origin.get("chat_type") or "dm")})
     return rows
