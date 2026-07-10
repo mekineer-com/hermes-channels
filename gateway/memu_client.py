@@ -84,10 +84,9 @@ def normalize_history_for_memu(
         if not text:
             continue
 
-        out: dict[str, Any] = {
-            "role": role,
-            "content": text,
-        }
+        out: dict[str, Any] = {"content": text}
+        if role == "assistant":
+            out["role"] = role
         # Preserve explicit participant names from transcript rows.
         # Never force-fill user names from session metadata: in multi-chat
         # scenarios that can stamp the wrong person across a DM transcript.

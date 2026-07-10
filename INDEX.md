@@ -70,6 +70,10 @@ Hermes:
 
 - WhatsApp group sessions are shared by group chat, not split per participant.
   Sender identity remains metadata, not conversation identity.
+- `role=user` in the Channels transcript DB means "incoming human message",
+  not "the OpenAlma scope user". Do not send that role to memU as semantic
+  speaker identity; direct memU payloads preserve `sender_name` and omit user
+  role, while assistant/soul rows keep `role=assistant`.
 - `whatsapp_message_arrivals` is evidence only. It records history/live arrivals
   but is not a durable response claim and must not become a trigger/skip gate.
 - `_active_source_keys` is load-bearing. It covers the in-flight window after a
