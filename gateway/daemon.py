@@ -624,6 +624,13 @@ class ChannelsDaemon:
     async def _dispatch_built_message_event(self, event: MessageEvent) -> None:
         raw = event.raw_message if isinstance(event.raw_message, dict) else {}
         delivery_mode = self._bridge_delivery_mode(raw)
+        if str(raw.get("deliveryMode") or "").strip().lower() not in {"live", "persist_only", "revoke"} and delivery_mode != "revoke":
+            logger.warning(
+                "[whatsapp] Bridge event missing/invalid deliveryMode; treating as non-live chat_id=%r message_id=%r mode=%r",
+                raw.get("chatId"),
+                raw.get("messageId"),
+                raw.get("deliveryMode"),
+            )
         source_key = self._whatsapp_source_key(raw)
         if delivery_mode == "live" and self.settings.max_message_age_seconds > 0:
             timestamp = _coerce_gateway_timestamp(raw.get("timestamp"))
@@ -1614,24 +1621,28 @@ class ChannelsDaemon:
         source_message_id = str(raw.get("messageId") or "").strip()
         if not source_chat_id or not source_message_id:
             return False
-        handled = self._db.message_source_key_is_processed(
-            source_chat_id=source_chat_id,
-            source_message_id=source_message_id,
-        )
-        if not handled:
-            # A bare persisted row is NOT handled: history-sync copies are
-            # persist-only (stored, never answered), so the live copy must
-            # still get its turn. Skip only when a response exists or the
-            # key was marked processed (covers listen-only outcomes).
-            handled = self._db.message_source_key_has_response(
+        try:
+            handled = self._db.message_source_key_is_processed(
                 source_chat_id=source_chat_id,
                 source_message_id=source_message_id,
             )
-            if handled:
-                self._db.mark_message_source_key_processed(
+            if not handled:
+                # A bare persisted row is NOT handled: history-sync copies are
+                # persist-only (stored, never answered), so the live copy must
+                # still get its turn. Skip only when a response exists or the
+                # key was marked processed (covers listen-only outcomes).
+                handled = self._db.message_source_key_has_response(
                     source_chat_id=source_chat_id,
                     source_message_id=source_message_id,
                 )
+                if handled:
+                    self._db.mark_message_source_key_processed(
+                        source_chat_id=source_chat_id,
+                        source_message_id=source_message_id,
+                    )
+        except Exception:
+            logger.error("Failed to check WhatsApp duplicate source key", exc_info=True)
+            return False
         if handled:
             logger.info("Skipped already-handled WhatsApp source message chat=%s message=%s", source_chat_id, source_message_id)
         return handled
@@ -1642,13 +1653,16 @@ class ChannelsDaemon:
         chat_id = str(getattr(source, "chat_id", "") or "").strip()
         if not source or source.platform != "whatsapp" or not message_id or not chat_id:
             return
-        session_entry = self.get_or_create_history_session(source)
-        self._db.stamp_latest_assistant_source_key(
-            session_id=session_entry.session_id,
-            source_chat_id=chat_id,
-            source_message_id=message_id,
-            content=content,
-        )
+        try:
+            session_entry = self.get_or_create_history_session(source)
+            self._db.stamp_latest_assistant_source_key(
+                session_id=session_entry.session_id,
+                source_chat_id=chat_id,
+                source_message_id=message_id,
+                content=content,
+            )
+        except Exception:
+            logger.error("Failed to stamp WhatsApp delivered assistant source key", exc_info=True)
 
     def _session_is_busy(self, session_key: str) -> bool:
         task = self._session_tasks.get(session_key)

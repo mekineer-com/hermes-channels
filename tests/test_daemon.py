@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 import sqlite3
 import threading
 import time
@@ -167,6 +168,77 @@ def test_dedup_gate_marks_wal_processed(tmp_path, monkeypatch):
         daemon._db.mark_message_source_key_processed(source_chat_id="123@lid", source_message_id="m1")
         await daemon._dispatch_built_message_event(event())
         assert daemon._gateway_wal.processed_up_to == 1
+        await daemon.disconnect()
+
+    asyncio.run(run())
+
+
+def test_duplicate_source_check_fails_open_on_db_error(tmp_path, monkeypatch):
+    daemon = make_daemon(tmp_path, monkeypatch)
+
+    def fail_processed(**_kwargs):
+        raise sqlite3.OperationalError("locked")
+
+    daemon._db.message_source_key_is_processed = fail_processed
+
+    try:
+        assert daemon._is_duplicate_source_message(event().raw_message) is False
+    finally:
+        asyncio.run(daemon.disconnect())
+
+
+def test_duplicate_source_check_fails_open_on_response_check_error(tmp_path, monkeypatch):
+    daemon = make_daemon(tmp_path, monkeypatch)
+    daemon._db.message_source_key_is_processed = lambda **_kwargs: False
+
+    def fail_response(**_kwargs):
+        raise sqlite3.OperationalError("locked")
+
+    daemon._db.message_source_key_has_response = fail_response
+
+    try:
+        assert daemon._is_duplicate_source_message(event().raw_message) is False
+    finally:
+        asyncio.run(daemon.disconnect())
+
+
+def test_duplicate_source_db_error_dispatches_normally_without_marking_wal(tmp_path, monkeypatch):
+    async def run():
+        daemon = make_daemon(tmp_path, monkeypatch)
+        ev = event("photo", "m1")
+        ev.message_type = MessageType.PHOTO
+        ev.raw_message["timestamp"] = time.time()
+        handled = []
+
+        def fail_processed(**_kwargs):
+            raise sqlite3.OperationalError("locked")
+
+        async def handle(received):
+            handled.append(received)
+
+        daemon._db.message_source_key_is_processed = fail_processed
+        daemon.handle_message = handle
+
+        await daemon._dispatch_built_message_event(ev)
+
+        assert handled == [ev]
+        assert daemon._gateway_wal.processed_up_to == 0
+        await daemon.disconnect()
+
+    asyncio.run(run())
+
+
+def test_dispatch_warns_on_invalid_delivery_mode(tmp_path, monkeypatch, caplog):
+    async def run():
+        daemon = make_daemon(tmp_path, monkeypatch)
+        ev = history_event("sent by me", "bad-mode")
+        ev.raw_message["deliveryMode"] = "bogus"
+        ev.raw_message["fromMe"] = True
+        caplog.set_level(logging.WARNING)
+
+        await daemon._dispatch_built_message_event(ev)
+
+        assert "Bridge event missing/invalid deliveryMode" in caplog.text
         await daemon.disconnect()
 
     asyncio.run(run())
@@ -624,16 +696,41 @@ def test_drain_respond_stamps_assistant_source_key_when_id_and_text_present(tmp_
         # Simulate the free-turn assistant row already persisted with no
         # source key, as _handle_turn does before the outbound is drained.
         daemon._db.append_message(entry.session_id, "assistant", "hi there")
+        calls = []
+
+        async def send_typing(chat_id, **_kwargs):
+            calls.append(("typing", chat_id))
 
         async def send(chat_id, text, **_kwargs):
+            calls.append(("send", chat_id, text))
             return SendResult(True, "wamid.999")
 
+        daemon.send_typing = send_typing
         daemon.send = send
         assert await daemon.drain_outbounds() == 1
+        assert calls == [("typing", "123@lid"), ("send", "123@lid", "hi there")]
         rows = daemon._db.get_messages(entry.session_id)
         assistant_row = next(row for row in rows if row["role"] == "assistant")
         assert assistant_row["source_chat_id"] == "123@lid"
         assert assistant_row["source_message_id"] == "wamid.999"
+        await daemon.disconnect()
+
+    asyncio.run(run())
+
+
+def test_handle_response_delivery_db_error_does_not_propagate(tmp_path, monkeypatch, caplog):
+    async def run():
+        daemon = make_daemon(tmp_path, monkeypatch)
+
+        def fail_stamp(**_kwargs):
+            raise sqlite3.OperationalError("locked")
+
+        daemon._db.stamp_latest_assistant_source_key = fail_stamp
+        caplog.set_level(logging.ERROR)
+
+        await daemon._handle_response_delivery(event(), SendResult(True, "provider-1"), "pong")
+
+        assert "Failed to stamp WhatsApp delivered assistant source key" in caplog.text
         await daemon.disconnect()
 
     asyncio.run(run())
