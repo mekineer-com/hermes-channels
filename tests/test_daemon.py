@@ -106,6 +106,24 @@ def history_event(text="hello", message_id="m1", *, wal_seq=1):
     return ev
 
 
+def test_whatsapp_group_session_key_is_shared_by_chat():
+    first = SessionSource(
+        platform="whatsapp",
+        chat_id="123-456@g.us",
+        chat_type="group",
+        user_id="111@lid",
+    )
+    second = SessionSource(
+        platform="whatsapp",
+        chat_id="123-456@g.us",
+        chat_type="group",
+        user_id="222@lid",
+    )
+
+    assert build_session_key(first) == build_session_key(second)
+    assert build_session_key(first) == "agent:main:whatsapp:group:123-456@g.us"
+
+
 async def wait_for_turns(memu, count, *, timeout=1.0):
     await wait_until(lambda: len(memu.turn_calls) >= count, timeout=timeout)
 

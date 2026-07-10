@@ -186,7 +186,7 @@ class SessionEntry:
 
 def build_session_key(
     source: SessionSource,
-    group_sessions_per_user: bool = True,
+    group_sessions_per_user: bool = False,
     thread_sessions_per_user: bool = False,
 ) -> str:
     ns = "agent:main"
