@@ -543,11 +543,14 @@ class ChannelsDaemon:
     async def disconnect(self) -> None:
         self._running = False
         self._stop_web_source()
-        for task in [self._poll_task, self._drain_task, *list(self._background_tasks), *self._pending_text_batch_tasks.values()]:
+        # Pending text batches are independent tasks; include them with the main
+        # daemon tasks or shutdown can leave delayed WhatsApp turns alive.
+        tasks = [self._poll_task, self._drain_task, *list(self._background_tasks), *self._pending_text_batch_tasks.values()]
+        for task in tasks:
             if task and not task.done():
                 task.cancel()
         await asyncio.gather(
-            *(task for task in [self._poll_task, self._drain_task, *list(self._background_tasks), *self._pending_text_batch_tasks.values()] if task),
+            *(task for task in tasks if task),
             return_exceptions=True,
         )
         if self._bridge_process:
