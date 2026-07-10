@@ -237,7 +237,7 @@ def test_turn_payload_and_respond_route(tmp_path, monkeypatch):
         response = await daemon._handle_turn(event(), "agent:main:whatsapp:dm:123@lid")
         assert response == "pong"
         assert memu.turn_calls[0]["conversation_id"] == "whatsapp:dm:123@lid"
-        assert memu.turn_calls[0]["channel_mode"] == "direct"
+        assert memu.turn_calls[0]["chat_type"] == "dm"
         assert memu.turn_calls[0]["external_message_id"] == "m1"
         # Regression: WhatsApp turns never send DB transcript history to memU
         # (memU owns WhatsApp history itself).

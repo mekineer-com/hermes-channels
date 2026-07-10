@@ -189,7 +189,6 @@ class MemuHttpClient:
         user_name: str | None = None,
         soul_card: str | None = None,
         debug: bool = False,
-        channel_mode: str | None = None,
         chat_name: str | None = None,
         chat_type: str | None = None,
         memorize_chat: bool | None = None,
@@ -213,8 +212,6 @@ class MemuHttpClient:
             payload["user_name"] = speaker_name
         if soul_card:
             payload["soul_card"] = str(soul_card)
-        if channel_mode:
-            payload["channel_mode"] = str(channel_mode)
         # chat_name / chat_type identify the originating chat (e.g. "Alice" / "dm").
         # memu uses them to render "Current chat:" in the turn prompt.
         chat_name_clean = str(chat_name or "").strip()

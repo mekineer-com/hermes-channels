@@ -886,7 +886,6 @@ class ChannelsDaemon:
             canonical_whatsapp_fn=canonical_whatsapp_jid,
         )
         chat_type = str(source.chat_type or "").strip().lower()
-        channel_mode = "group" if (source.platform == "whatsapp" and chat_type != "dm") else "direct"
         policy, memorize_chat = whatsapp_channel_settings(source.chat_id)
         allow_public_response = True
         if policy == "excluded":
@@ -908,7 +907,6 @@ class ChannelsDaemon:
                 history_user_name=sender_name,
                 user_name=sender_name,
                 debug=False,
-                channel_mode=channel_mode,
                 chat_name=source.chat_name,
                 chat_type=chat_type,
                 memorize_chat=memorize_chat,
@@ -921,7 +919,7 @@ class ChannelsDaemon:
             if not bool(turn_ok):
                 raise MemuClientError("memU turn returned ok=false", response_body=json.dumps(turn_out, default=str))
             if not turn_out.get("should_respond", True):
-                logger.info("Soul chose LISTEN for %s (channel_mode=%s)", conversation_id, channel_mode)
+                logger.info("Soul chose LISTEN for %s (chat_type=%s)", conversation_id, chat_type or "unknown")
                 return ""
             response_target = str(turn_out.get("response_target") or "respond").strip().lower()
             response_text = str(turn_out.get("response") or "").strip()
