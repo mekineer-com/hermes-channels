@@ -24,7 +24,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "soul_id": "default",
     "user_id": "marcos",
     "bridge_port": 3000,
-    "timeout_seconds": 90.0,
+    "timeout_seconds": 180.0,
     "poll_interval_seconds": 1.0,
     "drain_interval_seconds": 2.0,
     "max_message_age_seconds": 300,
