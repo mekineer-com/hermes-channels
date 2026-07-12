@@ -122,7 +122,9 @@ export function createMessageIngest(ctx) {
     let chatId = normalizeId(msg.key.remoteJid || chatFallback || '');
     if (!chatId || !messageId || chatId.toLowerCase() === 'status@broadcast') return false;
 
-    const timestamp = msg.messageTimestamp || msg.messageC2STimestamp || rawMsg?.messageTimestamp;
+    const messageTimestamp = timestampSeconds(msg.messageTimestamp || rawMsg?.messageTimestamp);
+    const messageC2STimestamp = timestampSeconds(msg.messageC2STimestamp || rawMsg?.messageC2STimestamp);
+    const timestamp = messageC2STimestamp || messageTimestamp;
     if (!syncTimestampAllowed(timestamp, config.syncHistoryWindowDays)) return false;
     if (
       surface === 'chats.update'
@@ -244,6 +246,8 @@ export function createMessageIngest(ctx) {
       hasQuotedMessage: false,
       botIds: [],
       timestamp,
+      messageTimestamp,
+      messageC2STimestamp,
       speakerRoleHint,
       speakerNameHint,
     };
@@ -501,6 +505,9 @@ export function createMessageIngest(ctx) {
         lastSenderName: msg.key.fromMe ? '' : resolvedSenderName,
       });
 
+      const messageTimestamp = timestampSeconds(msg.messageTimestamp);
+      const messageC2STimestamp = timestampSeconds(msg.messageC2STimestamp);
+      const timestamp = messageC2STimestamp || messageTimestamp;
       const event = {
         deliveryMode: mode.deliveryMode,
         messageId: msg.key.id,
@@ -519,14 +526,16 @@ export function createMessageIngest(ctx) {
         quotedRemoteJid,
         hasQuotedMessage,
         botIds,
-        timestamp: msg.messageTimestamp,
+        timestamp,
+        messageTimestamp,
+        messageC2STimestamp,
         speakerRoleHint,
         speakerNameHint,
       };
       const delivery = classifyUpsertEvent({
         type,
         isAgentEcho,
-        timestamp: msg.messageTimestamp,
+        timestamp,
         bridgeStartedAtSeconds: config.bridgeStartedAtSeconds,
         startupReplayGraceSeconds: config.startupReplayGraceSeconds,
       });

@@ -61,7 +61,8 @@ test('handleUpsert queues a self-chat text event with current delivery fields', 
     messages: [{
       key: { remoteJid: '111@s.whatsapp.net', id: 'm1', fromMe: true },
       message: { conversation: 'hello' },
-      messageTimestamp: 1000,
+      messageTimestamp: 1002,
+      messageC2STimestamp: 1001,
     }],
   });
 
@@ -84,7 +85,9 @@ test('handleUpsert queues a self-chat text event with current delivery fields', 
     quotedRemoteJid: null,
     hasQuotedMessage: false,
     botIds: ['111@s.whatsapp.net', '111@lid'],
-    timestamp: 1000,
+    timestamp: 1001,
+    messageTimestamp: 1002,
+    messageC2STimestamp: 1001,
     speakerRoleHint: 'user',
     speakerNameHint: '',
   });
@@ -92,6 +95,25 @@ test('handleUpsert queues a self-chat text event with current delivery fields', 
     chatId: '111@s.whatsapp.net',
     row: { isGroup: false, name: '111', lastSenderName: '' },
   }]);
+});
+
+test('history events preserve both timestamps and prefer client send time', async () => {
+  const { ingest, queued } = makeIngest();
+  const now = Math.floor(Date.now() / 1000);
+
+  await ingest.enqueueHistoryMessages({
+    messages: [{
+      key: { remoteJid: '222@s.whatsapp.net', id: 'm-history', fromMe: true },
+      message: { conversation: 'older message' },
+      messageTimestamp: now,
+      messageC2STimestamp: now - 10,
+    }],
+  });
+
+  assert.deepEqual(
+    [queued[0].timestamp, queued[0].messageTimestamp, queued[0].messageC2STimestamp],
+    [now - 10, now, now - 10],
+  );
 });
 
 test('handleUpdate queues revokes only for delete updates', () => {
