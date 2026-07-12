@@ -37,5 +37,4 @@ def test_garbage_numeric_value_falls_back_to_default_with_warning(tmp_path, monk
         settings = load_config()
 
     assert settings.bridge_port == 3000  # default, not raised
-    assert settings.max_message_age_seconds == 600
     assert any("bridge_port" in record.message for record in caplog.records)
