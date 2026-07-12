@@ -72,4 +72,4 @@ cd web-source && npm test
 
 ## License
 
-GPLv3. The upstream hermes-agent bridge code is MIT (Nous Research) — GPLv3 is compatible.
+MIT. Includes MIT-licensed bridge code from Nous Research's hermes-agent.
