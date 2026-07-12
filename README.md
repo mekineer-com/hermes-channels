@@ -1,8 +1,16 @@
+<p align="center">
+  <img src="assets/banner.png" alt="hermes-channels" width="100%">
+</p>
+
 # hermes-channels
 
 WhatsApp communications layer for [OpenAlma](https://github.com/mekineer-com/OpenAlma). Handles live message delivery, history capture, and the bridge between WhatsApp and the memU memory server.
 
 Part of the OpenAlma stack — not a standalone WhatsApp bot framework.
+
+## Lineage
+
+hermes-channels is extracted from [hermes-agent](https://github.com/NousResearch/hermes-agent) by [Nous Research](https://nousresearch.com) — an open-source self-improving AI agent framework. We kept only the WhatsApp protocol and gateway layer; the soul turn, memory, and policy logic moved to [mcp-memu-server](https://github.com/mekineer-com/mcp-memu-server). The Baileys bridge and whatsapp-web.js web-source remain close to their hermes-agent originals.
 
 ## Architecture
 
@@ -62,6 +70,6 @@ cd bridge && npm test
 cd web-source && npm test
 ```
 
-## Relationship to hermes-agent
+## License
 
-hermes-channels is a focused extraction from [hermes-agent](https://github.com/mekineer-com/hermes-agent). It keeps only the WhatsApp protocol and gateway layer — the soul turn, memory, and policy logic live in [mcp-memu-server](https://github.com/mekineer-com/mcp-memu-server).
+GPLv3. The upstream hermes-agent bridge code is MIT (Nous Research) — GPLv3 is compatible.
