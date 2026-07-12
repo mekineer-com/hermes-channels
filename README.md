@@ -32,7 +32,7 @@ Config file: `data/config.json` (created on first run). Override with environmen
 |---------|---------|---------|
 | `CHANNELS_MEMU_BASE_URL` | `http://127.0.0.1:8099` | memU server URL |
 | `CHANNELS_SOUL_ID` | `default` | Soul identity |
-| `CHANNELS_USER_ID` | `marcos` | User scope |
+| `CHANNELS_USER_ID` | `user` | User scope |
 | `CHANNELS_BRIDGE_PORT` | `3000` | Baileys bridge port |
 | `CHANNELS_HOME` | platform default | Data directory |
 

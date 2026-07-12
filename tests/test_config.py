@@ -15,7 +15,7 @@ def test_env_override_beats_config_json_beats_defaults(tmp_path, monkeypatch):
 
     assert settings.soul_id == "from-env"  # env beats config.json
     assert settings.bridge_port == 4000  # config.json beats default
-    assert settings.user_id == "marcos"  # untouched default
+    assert settings.user_id == "user"  # untouched default
     assert settings.web_source_auto_headful is False
 
 

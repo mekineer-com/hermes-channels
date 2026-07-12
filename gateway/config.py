@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_CONFIG: dict[str, Any] = {
     "memu_base_url": "http://127.0.0.1:8099",
     "soul_id": "default",
-    "user_id": "marcos",
+    "user_id": "user",
     "bridge_port": 3000,
     "timeout_seconds": 180.0,
     "poll_interval_seconds": 1.0,
