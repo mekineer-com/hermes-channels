@@ -27,7 +27,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "timeout_seconds": 180.0,
     "poll_interval_seconds": 1.0,
     "drain_interval_seconds": 2.0,
-    "max_message_age_seconds": 300,
+    "max_message_age_seconds": 600,
     "text_batch_delay_seconds": 5.0,
     "text_batch_split_delay_seconds": 10.0,
     "mode": "",

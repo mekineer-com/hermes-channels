@@ -70,6 +70,7 @@ test('handleUpsert queues a self-chat text event with current delivery fields', 
     deliveryMode: 'live',
     messageId: 'm1',
     chatId: '111@s.whatsapp.net',
+    fromMe: true,
     senderId: '111@s.whatsapp.net',
     senderName: 'Me',
     chatName: '111',
@@ -92,6 +93,20 @@ test('handleUpsert queues a self-chat text event with current delivery fields', 
     chatId: '111@s.whatsapp.net',
     row: { isGroup: false, name: '111', lastSenderName: '' },
   }]);
+});
+
+test('history events preserve fromMe for downstream trigger filtering', async () => {
+  const { ingest, queued } = makeIngest();
+
+  await ingest.enqueueHistoryMessages({
+    messages: [{
+      key: { remoteJid: '222@s.whatsapp.net', id: 'm-history', fromMe: true },
+      message: { conversation: 'older message' },
+      messageTimestamp: Math.floor(Date.now() / 1000),
+    }],
+  });
+
+  assert.equal(queued[0].fromMe, true);
 });
 
 test('handleUpdate queues revokes only for delete updates', () => {
