@@ -1686,7 +1686,7 @@ class ChannelsDaemon:
                 pass
 
     def _text_batch_key(self, event: MessageEvent) -> str:
-        return build_session_key(event.source)
+        return build_session_key(event.source, group_sessions_per_user=True)
 
     def _resolve_event_chat_name(self, data: dict[str, Any], *, is_group: bool) -> str:
         chat_name = str(data.get("chatName") or "").strip()

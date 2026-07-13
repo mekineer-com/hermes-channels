@@ -127,7 +127,7 @@ python -m pytest -q tests
 
 ```bash
 cd bridge
-npm test
+node --test *.test.mjs
 ```
 
 ### Run Web-Source Tests

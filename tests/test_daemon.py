@@ -107,7 +107,7 @@ def history_event(text="hello", message_id="m1", *, wal_seq=1):
     return ev
 
 
-def test_whatsapp_group_session_key_is_shared_by_chat():
+def test_whatsapp_group_session_is_shared_but_text_batches_are_per_sender():
     first = SessionSource(
         platform="whatsapp",
         chat_id="123-456@g.us",
@@ -123,6 +123,10 @@ def test_whatsapp_group_session_key_is_shared_by_chat():
 
     assert build_session_key(first) == build_session_key(second)
     assert build_session_key(first) == "agent:main:whatsapp:group:123-456@g.us"
+    daemon = object.__new__(ChannelsDaemon)
+    assert daemon._text_batch_key(MessageEvent(text="one", source=first)) != daemon._text_batch_key(
+        MessageEvent(text="two", source=second)
+    )
 
 
 async def wait_for_turns(memu, count, *, timeout=1.0):
