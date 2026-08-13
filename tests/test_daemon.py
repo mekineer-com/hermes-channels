@@ -350,6 +350,25 @@ def test_logged_out_bridge_archives_session_and_retries_pairing(tmp_path, monkey
     asyncio.run(run())
 
 
+def test_logged_out_web_source_archives_auth_and_restarts(tmp_path, monkeypatch):
+    daemon = make_daemon(tmp_path, monkeypatch)
+    daemon.settings.web_source_enabled = True
+    daemon.home = tmp_path
+    daemon._web_source_auth_path.mkdir(parents=True)
+    (daemon._web_source_auth_path / "session.json").write_text("old")
+    daemon._web_source_process = type("Process", (), {"poll": lambda _self: 42})()
+    restarted = []
+    daemon._start_web_source = lambda: restarted.append(True) or True
+
+    daemon._check_web_source_exit()
+
+    backups = list((tmp_path / "backups").glob("wwebjs-auth-logged-out-*"))
+    assert len(backups) == 1
+    assert (backups[0] / "session.json").read_text() == "old"
+    assert daemon._web_source_auth_path.is_dir()
+    assert restarted == [True]
+
+
 def test_turn_payload_and_respond_route(tmp_path, monkeypatch):
     async def run():
         memu = FakeMemu({"ok": True, "response": "pong", "response_target": "respond"})

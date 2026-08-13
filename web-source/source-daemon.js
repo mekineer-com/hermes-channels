@@ -375,7 +375,7 @@ async function main() {
     // Exit so the process death is visible and the gateway can restart.
     store.close();
     status.flush();
-    process.exit(1);
+    process.exit(String(reason).toUpperCase() === 'LOGOUT' ? 42 : 1);
   });
 
   process.on('SIGINT', async () => {

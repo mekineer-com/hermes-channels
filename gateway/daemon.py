@@ -1925,6 +1925,7 @@ class ChannelsDaemon:
     def _check_web_source_exit(self) -> None:
         if not self.settings.web_source_enabled or not self._web_source_process:
             return
+        status = self._read_web_source_status()
         returncode = self._web_source_process.poll()
         if returncode is not None:
             logger.warning("[whatsapp] WhatsApp web-source exited unexpectedly with code %s", returncode)
@@ -1934,8 +1935,15 @@ class ChannelsDaemon:
             except OSError:
                 pass
             self._close_web_source_log()
+            if returncode == _WHATSAPP_LOGGED_OUT_EXIT_CODE:
+                backup_dir = self.home / "backups"
+                backup_dir.mkdir(parents=True, exist_ok=True)
+                backup = backup_dir / f"wwebjs-auth-logged-out-{datetime.now():%Y%m%dT%H%M%S%f}"
+                shutil.move(self._web_source_auth_path, backup)
+                self._web_source_auth_path.mkdir(mode=0o700, parents=True)
+                logger.warning("[whatsapp] Archived logged-out wwebjs auth at %s; pairing required", backup)
+                self._start_web_source()
             return
-        status = self._read_web_source_status()
         if (
             status.get("state") == "pairing"
             and not self.settings.web_source_headful

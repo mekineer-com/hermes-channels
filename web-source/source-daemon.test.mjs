@@ -26,3 +26,7 @@ test('source daemon persists QR payload without logging it', () => {
   assert.match(source, /state:\s*'auth_failure',\s*qr:\s*null/);
   assert.match(source, /state:\s*'ready',\s*qr:\s*null/);
 });
+
+test('source daemon distinguishes logout for pairing recovery', () => {
+  assert.match(source, /String\(reason\)\.toUpperCase\(\) === 'LOGOUT' \? 42 : 1/);
+});
