@@ -349,8 +349,8 @@ async function startSocket() {
       socketLifecycle.markDisconnected(socketId);
 
       if (reason === DisconnectReason.loggedOut) {
-        console.log('❌ Logged out. Delete session and restart to re-authenticate.');
-        process.exit(1);
+        console.log('❌ Logged out. Restarting in pairing mode.');
+        process.exit(42);
       } else {
         // 515 = restart requested (common after pairing). Always reconnect.
         if (reason === 515) {

@@ -68,6 +68,7 @@ SUPPORTED_DOCUMENT_TYPES = {
     ".sh": "text/plain",
 }
 _IS_WINDOWS = os.name == "nt"
+_WHATSAPP_LOGGED_OUT_EXIT_CODE = 42
 
 HERMES_HUNK_RANGES = {
     "bridge_lifecycle": "gateway/platforms/whatsapp.py:520-1210",
@@ -501,8 +502,7 @@ class ChannelsDaemon:
         for _ in range(15):
             await asyncio.sleep(1)
             if self._bridge_process.poll() is not None:
-                self._close_bridge_log()
-                return False
+                return await self._recover_logged_out_session(had_creds)
             data = await self._bridge_health()
             if data:
                 http_ready = True
@@ -528,8 +528,7 @@ class ChannelsDaemon:
             for _ in range(15):
                 await asyncio.sleep(1)
                 if self._bridge_process.poll() is not None:
-                    self._close_bridge_log()
-                    return False
+                    return await self._recover_logged_out_session(had_creds)
                 data = await self._bridge_health()
                 if data.get("status") == "connected":
                     break
@@ -539,6 +538,20 @@ class ChannelsDaemon:
         await self._replay_gateway_wal()
         self._poll_task = asyncio.create_task(self._poll_messages())
         return True
+
+    async def _recover_logged_out_session(self, had_creds: bool) -> bool:
+        returncode = self._bridge_process.poll() if self._bridge_process else None
+        self._close_bridge_log()
+        if not had_creds or returncode != _WHATSAPP_LOGGED_OUT_EXIT_CODE:
+            return False
+        self._release_session_lock()
+        backup_dir = self.home / "backups"
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        backup = backup_dir / f"whatsapp-session-logged-out-{datetime.now():%Y%m%dT%H%M%S%f}"
+        shutil.move(self._session_path, backup)
+        self._session_path.mkdir(mode=0o700, parents=True)
+        logger.warning("[whatsapp] Archived logged-out session at %s; pairing required", backup)
+        return await self.connect()
 
     async def disconnect(self) -> None:
         self._running = False

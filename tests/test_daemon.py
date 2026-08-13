@@ -324,6 +324,32 @@ def test_connect_without_creds_starts_bridge_http_but_not_polling(tmp_path, monk
     asyncio.run(run())
 
 
+def test_logged_out_bridge_archives_session_and_retries_pairing(tmp_path, monkeypatch):
+    async def run():
+        daemon = make_daemon(tmp_path, monkeypatch)
+        daemon.home = tmp_path
+        daemon._session_path.mkdir(parents=True)
+        (daemon._session_path / "creds.json").write_text("old")
+        daemon._bridge_process = type("Process", (), {"poll": lambda _self: 42})()
+        released = []
+        daemon._release_session_lock = lambda: released.append(True)
+
+        async def reconnect():
+            return True
+
+        daemon.connect = reconnect
+
+        assert await daemon._recover_logged_out_session(True) is True
+        assert released == [True]
+        assert daemon._session_path.is_dir()
+        backups = list((tmp_path / "backups").glob("whatsapp-session-logged-out-*"))
+        assert len(backups) == 1
+        assert (backups[0] / "creds.json").read_text() == "old"
+        assert f"process.exit({daemon_module._WHATSAPP_LOGGED_OUT_EXIT_CODE})" in daemon._bridge_script.read_text()
+
+    asyncio.run(run())
+
+
 def test_turn_payload_and_respond_route(tmp_path, monkeypatch):
     async def run():
         memu = FakeMemu({"ok": True, "response": "pong", "response_target": "respond"})
