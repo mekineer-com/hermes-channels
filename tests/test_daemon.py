@@ -71,6 +71,10 @@ async def async_noop(*_args, **_kwargs):
     return None
 
 
+async def async_value(value):
+    return value
+
+
 def event(text="hello", message_id="m1"):
     source = SessionSource(
         platform="whatsapp",
@@ -346,6 +350,102 @@ def test_logged_out_bridge_archives_session_and_retries_pairing(tmp_path, monkey
         assert len(backups) == 1
         assert (backups[0] / "creds.json").read_text() == "old"
         assert f"process.exit({daemon_module._WHATSAPP_LOGGED_OUT_EXIT_CODE})" in daemon._bridge_script.read_text()
+
+    asyncio.run(run())
+
+
+def test_poll_recovers_logged_out_bridge_once(tmp_path, monkeypatch):
+    async def run():
+        daemon = make_daemon(tmp_path, monkeypatch)
+        daemon._running = True
+        daemon._session_path.mkdir(parents=True)
+        (daemon._session_path / "creds.json").write_text("old")
+        daemon._bridge_process = type("Process", (), {"poll": lambda _self: 42})()
+        recovered = []
+
+        async def recover(had_creds):
+            recovered.append(had_creds)
+            return True
+
+        daemon._recover_logged_out_session = recover
+
+        await daemon._poll_messages()
+
+        assert recovered == [True]
+        assert not daemon._stop_requested.is_set()
+        daemon._db.close()
+
+    asyncio.run(run())
+
+
+def test_poll_recovers_managed_bridge_once_and_returns_old_poller(tmp_path, monkeypatch):
+    async def run():
+        daemon = make_daemon(tmp_path, monkeypatch)
+        daemon._running = True
+        daemon._bridge_process = type("Process", (), {"poll": lambda _self: 1})()
+        replacement_wait = asyncio.Event()
+        connect_calls = []
+
+        async def connect():
+            connect_calls.append(True)
+            daemon._poll_task = asyncio.create_task(replacement_wait.wait())
+            return True
+
+        daemon.connect = connect
+
+        await daemon._poll_messages()
+
+        assert connect_calls == [True]
+        assert daemon._poll_task is not None and not daemon._poll_task.done()
+        daemon._poll_task.cancel()
+        await asyncio.gather(daemon._poll_task, return_exceptions=True)
+        daemon._db.close()
+
+    asyncio.run(run())
+
+
+def test_poll_recovers_adopted_bridge_when_endpoint_disappears(tmp_path, monkeypatch):
+    async def run():
+        daemon = make_daemon(tmp_path, monkeypatch)
+        daemon._running = True
+        daemon._bridge_process = None
+        connect_calls = []
+
+        async def bridge_messages(*_args, **_kwargs):
+            raise OSError("bridge unavailable")
+
+        async def connect():
+            connect_calls.append(True)
+            return True
+
+        daemon._bridge_get_json = bridge_messages
+        daemon._bridge_health = lambda: async_value({})
+        daemon.connect = connect
+
+        await daemon._poll_messages()
+
+        assert connect_calls == [True]
+        assert not daemon._stop_requested.is_set()
+        daemon._db.close()
+
+    asyncio.run(run())
+
+
+def test_poll_requests_daemon_stop_when_bridge_recovery_fails(tmp_path, monkeypatch):
+    async def run():
+        daemon = make_daemon(tmp_path, monkeypatch)
+        daemon._running = True
+        daemon._bridge_process = type("Process", (), {"poll": lambda _self: 1})()
+
+        async def connect():
+            raise OSError("restart failed")
+
+        daemon.connect = connect
+
+        await daemon._poll_messages()
+
+        assert daemon._stop_requested.is_set()
+        daemon._db.close()
 
     asyncio.run(run())
 

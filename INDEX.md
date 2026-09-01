@@ -99,6 +99,10 @@ Hermes:
 
 ## Important Edge Cases
 
+- A dead managed or adopted Baileys bridge gets one in-daemon reconnect attempt.
+  Logout reuses session archival and returns to pairing; failed recovery stops
+  Channels instead of leaving a live deaf daemon. Do not add an independent
+  restart loop without evidence that one attempt is insufficient.
 - Staleness uses the WhatsApp message timestamp, not daemon receipt time.
 - Live stale rows must mark WAL processed before returning.
 - `deliveryMode` controls live vs persist-only vs revoke. Missing/invalid values

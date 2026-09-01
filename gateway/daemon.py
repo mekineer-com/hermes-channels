@@ -553,6 +553,21 @@ class ChannelsDaemon:
         logger.warning("[whatsapp] Archived logged-out session at %s; pairing required", backup)
         return await self.connect()
 
+    async def _recover_bridge_once(self, returncode: int | None) -> None:
+        try:
+            if returncode == _WHATSAPP_LOGGED_OUT_EXIT_CODE:
+                had_creds = (self._session_path / "creds.json").exists()
+                recovered = await self._recover_logged_out_session(had_creds)
+            else:
+                self._close_bridge_log()
+                recovered = await self.connect()
+        except Exception:
+            logger.exception("[whatsapp] Bridge recovery raised")
+            recovered = False
+        if not recovered:
+            logger.error("[whatsapp] Bridge recovery failed; stopping Channels daemon")
+            self.request_stop()
+
     async def disconnect(self) -> None:
         self._running = False
         self._stop_web_source()
@@ -587,8 +602,11 @@ class ChannelsDaemon:
         wal = self._gateway_wal
         while self._running:
             self._check_web_source_exit()
-            if self._bridge_process and self._bridge_process.poll() is not None:
-                break
+            if self._bridge_process:
+                returncode = self._bridge_process.poll()
+                if returncode is not None:
+                    await self._recover_bridge_once(returncode)
+                    return
             try:
                 drained = False
                 while self._running and not drained:
@@ -622,6 +640,9 @@ class ChannelsDaemon:
                 break
             except Exception as exc:
                 logger.warning("[whatsapp] Poll error: %s", exc)
+                if not await self._bridge_health():
+                    await self._recover_bridge_once(None)
+                    return
                 await asyncio.sleep(5)
             await asyncio.sleep(self.settings.poll_interval_seconds)
 
