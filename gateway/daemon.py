@@ -388,6 +388,7 @@ class ChannelsDaemon:
             base_url=self.settings.memu_base_url,
             timeout_seconds=self.settings.timeout_seconds,
         )
+        self.owner_id = self._memu_client.read_owner()
         self._outbound_sent_path = self.whatsapp_home / "outbound_sent.json"
         self._outbound_sent_ids: set[str] | None = None
 
@@ -944,7 +945,7 @@ class ChannelsDaemon:
             turn_out = await asyncio.to_thread(
                 self._memu_client.memu_turn,
                 conversation_id=conversation_id,
-                user_id=self.settings.user_id,
+                user_id=self.owner_id,
                 soul_id=self.settings.soul_id,
                 message=str(event.text or "").strip(),
                 history=history,
@@ -1247,7 +1248,7 @@ class ChannelsDaemon:
     async def drain_outbounds(self) -> int:
         rows = await asyncio.to_thread(
             self._memu_client.claim_whatsapp_outbounds,
-            user_id=self.settings.user_id,
+            user_id=self.owner_id,
             soul_id=self.settings.soul_id,
             claimed_by="channels",
             limit=10,
@@ -1269,7 +1270,7 @@ class ChannelsDaemon:
         async def _mark(status: str, *, provider_message_id: str | None = None, error: str | None = None) -> None:
             await asyncio.to_thread(
                 self._memu_client.mark_whatsapp_outbound,
-                user_id=self.settings.user_id,
+                user_id=self.owner_id,
                 soul_id=self.settings.soul_id,
                 outbound_id=out_id,
                 status=status,

@@ -26,7 +26,6 @@ def settings() -> DaemonSettings:
     return DaemonSettings(
         memu_base_url="http://memu.invalid",
         soul_id="soul",
-        user_id="user",
         bridge_port=3000,
         timeout_seconds=1,
         poll_interval_seconds=0.01,
@@ -46,6 +45,9 @@ class FakeMemu:
         self.claim_calls = []
         self.mark_calls = []
         self.rows = rows or []
+
+    def read_owner(self):
+        return "Fictional Owner"
 
     def memu_turn(self, **kwargs):
         self.turn_calls.append(kwargs)
@@ -476,6 +478,7 @@ def test_turn_payload_and_respond_route(tmp_path, monkeypatch):
         response = await daemon._handle_turn(event(), "agent:main:whatsapp:dm:123@lid")
         assert response == "pong"
         assert memu.turn_calls[0]["conversation_id"] == "whatsapp:dm:123@lid"
+        assert memu.turn_calls[0]["user_id"] == "Fictional Owner"
         assert memu.turn_calls[0]["chat_type"] == "dm"
         assert memu.turn_calls[0]["external_message_id"] == "m1"
         # Regression: WhatsApp turns never send DB transcript history to memU

@@ -33,7 +33,8 @@ old Hermes framework. The intended shape is smaller:
   `whatsapp_known_contacts.py`: WhatsApp identity/contact evidence and display
   seams.
 - `gateway/memu_client.py`: HTTP client for memU turn calls and outbound queue
-  claim/mark operations.
+  claim/mark operations. It also reads the canonical mcp-owned owner once when
+  the daemon starts; channel configuration does not own a separate user ID.
 - `gateway/memu_policy.py`: channel policy lookup from `data/memu.json`.
 
 ## Why This Shape Exists

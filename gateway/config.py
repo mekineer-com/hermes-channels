@@ -1,7 +1,7 @@
 """Channels daemon config.
 
 Defaults live in ``channels_home()/config.json`` and can be overridden by env:
-CHANNELS_MEMU_BASE_URL, CHANNELS_SOUL_ID, CHANNELS_USER_ID,
+CHANNELS_MEMU_BASE_URL, CHANNELS_SOUL_ID,
 CHANNELS_BRIDGE_PORT, CHANNELS_POLL_INTERVAL_SECONDS,
 CHANNELS_DRAIN_INTERVAL_SECONDS, CHANNELS_TIMEOUT_SECONDS.
 """
@@ -22,7 +22,6 @@ logger = logging.getLogger(__name__)
 DEFAULT_CONFIG: dict[str, Any] = {
     "memu_base_url": "http://127.0.0.1:8099",
     "soul_id": "default",
-    "user_id": "user",
     "bridge_port": 3000,
     "timeout_seconds": 180.0,
     "poll_interval_seconds": 1.0,
@@ -48,7 +47,6 @@ DEFAULT_CONFIG: dict[str, Any] = {
 class DaemonSettings:
     memu_base_url: str
     soul_id: str
-    user_id: str
     bridge_port: int
     timeout_seconds: float
     poll_interval_seconds: float
@@ -104,7 +102,6 @@ def load_config() -> DaemonSettings:
     env_map = {
         "CHANNELS_MEMU_BASE_URL": "memu_base_url",
         "CHANNELS_SOUL_ID": "soul_id",
-        "CHANNELS_USER_ID": "user_id",
         "CHANNELS_BRIDGE_PORT": "bridge_port",
         "CHANNELS_TIMEOUT_SECONDS": "timeout_seconds",
         "CHANNELS_POLL_INTERVAL_SECONDS": "poll_interval_seconds",
@@ -118,7 +115,6 @@ def load_config() -> DaemonSettings:
     return DaemonSettings(
         memu_base_url=str(data["memu_base_url"]).rstrip("/"),
         soul_id=str(data["soul_id"]),
-        user_id=str(data["user_id"]),
         bridge_port=_coerce_int(data["bridge_port"], DEFAULT_CONFIG["bridge_port"], "bridge_port"),
         timeout_seconds=_coerce_float(data["timeout_seconds"], DEFAULT_CONFIG["timeout_seconds"], "timeout_seconds"),
         poll_interval_seconds=_coerce_float(data["poll_interval_seconds"], DEFAULT_CONFIG["poll_interval_seconds"], "poll_interval_seconds"),

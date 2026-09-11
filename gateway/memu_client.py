@@ -132,12 +132,12 @@ class MemuHttpClient:
         self.base_url = raw.rstrip("/")
         self.timeout_seconds = float(timeout_seconds)
 
-    def _post(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
+    def _request(self, path: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         url = urllib.parse.urljoin(self.base_url + "/", path.lstrip("/"))
         request = urllib.request.Request(
             url,
-            data=json.dumps(payload).encode("utf-8"),
-            method="POST",
+            data=json.dumps(payload).encode("utf-8") if payload is not None else None,
+            method="POST" if payload is not None else "GET",
             headers={
                 "Content-Type": "application/json",
                 "Accept": "application/json",
@@ -175,6 +175,15 @@ class MemuHttpClient:
                 response_body=raw,
             )
         return parsed
+
+    def read_owner(self) -> str:
+        user_id = self._request("/owner").get("user_id")
+        if not isinstance(user_id, str) or not user_id.strip():
+            raise MemuClientError("OpenAlma owner has not been created")
+        return user_id
+
+    def _post(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
+        return self._request(path, payload)
 
     def memu_turn(
         self,

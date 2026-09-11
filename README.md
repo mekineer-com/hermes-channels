@@ -28,11 +28,13 @@ WhatsApp ──► Baileys bridge (Node.js)  ──► gateway/daemon.py ──�
 
 Config file: `data/config.json` (created on first run). Override with environment variables:
 
+The daemon reads the canonical OpenAlma owner from `mcp-memu-server` at startup.
+It does not maintain a separate Channels user identity.
+
 | Env var | Default | Purpose |
 |---------|---------|---------|
 | `CHANNELS_MEMU_BASE_URL` | `http://127.0.0.1:8099` | memU server URL |
 | `CHANNELS_SOUL_ID` | `default` | Soul identity |
-| `CHANNELS_USER_ID` | `user` | User scope |
 | `CHANNELS_BRIDGE_PORT` | `3000` | Baileys bridge port |
 | `CHANNELS_HOME` | platform default | Data directory |
 
