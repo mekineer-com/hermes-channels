@@ -182,6 +182,12 @@ class MemuHttpClient:
             raise MemuClientError("OpenAlma owner has not been created")
         return user_id
 
+    def list_souls(self) -> list[str]:
+        souls = self._request("/souls").get("souls")
+        if not isinstance(souls, list) or any(not isinstance(soul, str) or not soul for soul in souls):
+            raise MemuClientError("memU returned an invalid soul list")
+        return souls
+
     def _post(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
         return self._request(path, payload)
 

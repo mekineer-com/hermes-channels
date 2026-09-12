@@ -49,6 +49,9 @@ class FakeMemu:
     def read_owner(self):
         return "Fictional Owner"
 
+    def list_souls(self):
+        return ["soul"]
+
     def memu_turn(self, **kwargs):
         self.turn_calls.append(kwargs)
         return dict(self.turn)
@@ -67,6 +70,31 @@ def make_daemon(tmp_path, monkeypatch, memu=None):
     daemon = ChannelsDaemon(settings(), memu_client=memu or FakeMemu())
     daemon.send_typing = async_noop
     return daemon
+
+
+@pytest.mark.parametrize("soul_id", ["", "unknown", "Soul"])
+def test_daemon_rejects_unavailable_soul_before_creating_state(tmp_path, monkeypatch, soul_id):
+    monkeypatch.setenv("CHANNELS_HOME", str(tmp_path))
+    configured = settings()
+    configured.soul_id = soul_id
+
+    with pytest.raises(RuntimeError):
+        ChannelsDaemon(configured, memu_client=FakeMemu())
+
+    assert not (tmp_path / "state.db").exists()
+
+
+def test_daemon_rejects_missing_owner_before_creating_state(tmp_path, monkeypatch):
+    class MissingOwner(FakeMemu):
+        def read_owner(self):
+            raise MemuClientError("OpenAlma owner has not been created")
+
+    monkeypatch.setenv("CHANNELS_HOME", str(tmp_path))
+
+    with pytest.raises(MemuClientError, match="owner has not been created"):
+        ChannelsDaemon(settings(), memu_client=MissingOwner())
+
+    assert not (tmp_path / "state.db").exists()
 
 
 async def async_noop(*_args, **_kwargs):

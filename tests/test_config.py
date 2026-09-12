@@ -4,6 +4,12 @@ import logging
 from gateway.config import _coerce_bool, load_config
 
 
+def test_soul_has_no_invented_default(tmp_path, monkeypatch):
+    monkeypatch.setenv("CHANNELS_HOME", str(tmp_path))
+
+    assert load_config().soul_id == ""
+
+
 def test_env_override_beats_config_json_beats_defaults(tmp_path, monkeypatch):
     monkeypatch.setenv("CHANNELS_HOME", str(tmp_path))
     (tmp_path / "config.json").write_text(

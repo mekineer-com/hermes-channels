@@ -346,6 +346,16 @@ class ChannelsDaemon:
 
     def __init__(self, settings: DaemonSettings | None = None, *, memu_client: Any = None):
         self.settings = settings or load_config()
+        self._memu_client = memu_client or MemuHttpClient(
+            base_url=self.settings.memu_base_url,
+            timeout_seconds=self.settings.timeout_seconds,
+        )
+        self.owner_id = self._memu_client.read_owner()
+        souls = self._memu_client.list_souls()
+        if not self.settings.soul_id:
+            raise RuntimeError("Channels soul is not configured")
+        if self.settings.soul_id not in souls:
+            raise RuntimeError(f"Channels soul does not exist: {self.settings.soul_id}")
         self.home = channels_home()
         self.whatsapp_home = self.home / "whatsapp"
         self._bridge_port = self.settings.bridge_port
@@ -384,11 +394,6 @@ class ChannelsDaemon:
         self._sessions_index = self._sessions_dir / "sessions.json"
         self._session_entries: dict[str, SessionEntry] = {}
         self._sessions_loaded = False
-        self._memu_client = memu_client or MemuHttpClient(
-            base_url=self.settings.memu_base_url,
-            timeout_seconds=self.settings.timeout_seconds,
-        )
-        self.owner_id = self._memu_client.read_owner()
         self._outbound_sent_path = self.whatsapp_home / "outbound_sent.json"
         self._outbound_sent_ids: set[str] | None = None
 
