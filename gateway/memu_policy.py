@@ -1,4 +1,4 @@
-"""Policy lookups read from ``~/.hermes/memu.json``.
+"""Policy lookups read from ``channels_home()/memu.json``.
 
 Today this file holds per-WhatsApp-channel routing policy. It will likely grow
 to carry other memU-adjacent operator settings (the launcher is the intended
@@ -64,7 +64,7 @@ def _read_whatsapp_channel_entries(chat_id: str) -> list[dict]:
 
 
 def whatsapp_channel_settings(chat_id: str) -> tuple[WhatsAppChannelPolicy, bool]:
-    """Return (policy, memorize) for a WhatsApp chat from ``~/.hermes/memu.json``."""
+    """Return (policy, memorize) for a WhatsApp chat from ``channels_home()/memu.json``."""
     entries = _read_whatsapp_channel_entries(chat_id)
     policy: WhatsAppChannelPolicy = "full"
     memorize: bool | None = None
