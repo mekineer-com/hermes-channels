@@ -8,6 +8,8 @@ WhatsApp communications layer for [OpenAlma](https://github.com/mekineer-com/Ope
 
 Part of the OpenAlma stack — not a standalone WhatsApp bot framework.
 
+For questions and ideas across the stack, use [OpenAlma Discussions](https://github.com/mekineer-com/OpenAlma/discussions).
+
 ## Lineage
 
 hermes-channels is extracted from [hermes-agent](https://github.com/NousResearch/hermes-agent) by [Nous Research](https://nousresearch.com) — an open-source self-improving AI agent framework. We kept only the WhatsApp protocol and gateway layer; the soul turn, memory, and policy logic moved to [mcp-memu-server](https://github.com/mekineer-com/mcp-memu-server). The Baileys bridge and whatsapp-web.js web-source remain close to their hermes-agent originals.
