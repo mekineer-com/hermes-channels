@@ -72,6 +72,7 @@ Hermes:
 
 - WhatsApp group sessions are shared by group chat, not split per participant.
   Sender identity remains metadata, not conversation identity.
+- WhatsApp policy defaults are stored in `memu.json` as `whatsapp.default_policy`. Missing legacy configuration remains `full`; the launcher freezes known legacy chats explicitly, sets the future-row default to `excluded`, and persists each newly discovered chat so later default changes are not retroactive.
 - `role=user` in the Channels transcript DB means "incoming human message",
   not "the OpenAlma scope user". Do not send that role to memU as semantic
   speaker identity; direct memU payloads preserve `sender_name` and omit user

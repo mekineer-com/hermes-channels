@@ -110,3 +110,33 @@ def test_whatsapp_channel_settings_excluded_alias_wins(hermes_home):
 
     assert whatsapp_channel_settings("263801622552699@lid") == ("excluded", False)
 
+
+def test_whatsapp_channel_settings_uses_configured_default_for_new_chat(hermes_home):
+    from gateway.memu_policy import whatsapp_channel_settings
+
+    _write_memu_json(hermes_home, {"whatsapp": {"default_policy": "excluded", "channels": {}}})
+
+    assert whatsapp_channel_settings("new@s.whatsapp.net") == ("excluded", False)
+
+
+def test_explicit_chat_policy_overrides_configured_default(hermes_home):
+    from gateway.memu_policy import whatsapp_channel_settings
+
+    _write_memu_json(hermes_home, {
+        "whatsapp": {
+            "default_policy": "excluded",
+            "channels": {
+                "existing@s.whatsapp.net": {"policy": "full", "memorize": True},
+            },
+        },
+    })
+
+    assert whatsapp_channel_settings("existing@s.whatsapp.net") == ("full", True)
+
+
+def test_whatsapp_channel_settings_keeps_legacy_full_default(hermes_home):
+    from gateway.memu_policy import whatsapp_channel_settings
+
+    _write_memu_json(hermes_home, {"whatsapp": {"channels": {}}})
+
+    assert whatsapp_channel_settings("existing@s.whatsapp.net") == ("full", True)

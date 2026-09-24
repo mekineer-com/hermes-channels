@@ -40,16 +40,10 @@ def _default_memorize_for_policy(policy: WhatsAppChannelPolicy) -> bool:
     return policy != "excluded"
 
 
-def _read_whatsapp_channel_entries(chat_id: str) -> list[dict]:
+def _read_whatsapp_channel_entries(chat_id: str, channels: object) -> list[dict]:
     raw = str(chat_id or "").strip()
     if not raw:
         return []
-    config = _read_memu_config()
-    channels = (
-        config.get("whatsapp", {}).get("channels", {})
-        if isinstance(config.get("whatsapp"), dict)
-        else {}
-    )
     if not isinstance(channels, dict) or not channels:
         return []
 
@@ -65,19 +59,32 @@ def _read_whatsapp_channel_entries(chat_id: str) -> list[dict]:
 
 def whatsapp_channel_settings(chat_id: str) -> tuple[WhatsAppChannelPolicy, bool]:
     """Return (policy, memorize) for a WhatsApp chat from ``channels_home()/memu.json``."""
-    entries = _read_whatsapp_channel_entries(chat_id)
+    config = _read_memu_config()
+    whatsapp = config.get("whatsapp") if isinstance(config.get("whatsapp"), dict) else {}
+    channels = whatsapp.get("channels", {})
+    raw_default = str(whatsapp.get("default_policy") or "").strip().lower()
+    default_policy: WhatsAppChannelPolicy = (
+        raw_default if raw_default in {"full", "listen_only", "excluded"} else "full"
+    )  # type: ignore[assignment]
+    entries = _read_whatsapp_channel_entries(chat_id, channels)
     policy: WhatsAppChannelPolicy = "full"
+    has_policy = False
     memorize: bool | None = None
     for entry in entries:
         raw_policy = str(entry.get("policy") or "").strip().lower()
         if raw_policy == "excluded":
             policy = "excluded"
+            has_policy = True
         elif raw_policy == "listen_only" and policy != "excluded":
             policy = "listen_only"
+            has_policy = True
         elif raw_policy == "full" and policy not in {"excluded", "listen_only"}:
             policy = "full"
+            has_policy = True
         if isinstance(entry.get("memorize"), bool):
             memorize = bool(entry.get("memorize")) if memorize is not True else True
+    if not has_policy:
+        policy = default_policy
     if policy == "excluded":
         return policy, False
     return policy, memorize if memorize is not None else _default_memorize_for_policy(policy)
