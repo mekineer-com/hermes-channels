@@ -11,7 +11,7 @@ import {
 
 test('normalizeMessage preserves WhatsApp projection fields', () => {
   const row = normalizeMessage({
-    id: { _serialized: 'true_123_c_us_MSG' },
+    id: { _serialized: 'true_123_c_us_MSG', remote: '123@c.us' },
     from: '123@c.us',
     to: '12025550199@c.us',
     author: '456@c.us',
@@ -31,6 +31,29 @@ test('normalizeMessage preserves WhatsApp projection fields', () => {
   assert.equal(row.author_local_id, '456');
   assert.equal(row.source, 'event:message');
   assert.equal(row.revoked, false);
+});
+
+test('normalizeMessage uses the message-key remote as chat identity', () => {
+  const direct = normalizeMessage({
+    id: { _serialized: 'true_owner_lid_MSG', remote: 'contact@lid' },
+    from: 'owner@lid',
+    to: 'contact@c.us',
+    fromMe: true,
+    timestamp: 100,
+    type: 'chat',
+  }, 'backfill:fetchMessages');
+  const groupCall = normalizeMessage({
+    id: { _serialized: 'false_group_g_us_MSG_participant_lid', remote: 'group@g.us' },
+    from: 'participant@lid',
+    to: 'owner@lid',
+    author: 'participant@lid',
+    fromMe: false,
+    timestamp: 100,
+    type: 'call_log',
+  }, 'backfill:fetchMessages');
+
+  assert.equal(direct.chat_id, 'contact@lid');
+  assert.equal(groupCall.chat_id, 'group@g.us');
 });
 
 test('normalize helpers reject non-conversation chats and preserve contact names', () => {

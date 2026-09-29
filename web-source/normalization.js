@@ -19,8 +19,7 @@ function messageKey(message) {
 }
 
 function messageChatId(message) {
-  if (message.fromMe) return idSerialized(message.to);
-  return idSerialized(message.from);
+  return idSerialized(message.id?.remote);
 }
 
 function mediaPlaceholder(message) {
