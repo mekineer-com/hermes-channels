@@ -23,7 +23,9 @@ old Hermes framework. The intended shape is smaller:
   This should remain copy-equivalent to final working `hermes-agent` bridge code
   unless a Channels-specific path/config seam requires a small delta.
 - `web-source/`: whatsapp-web.js history/source daemon. Captures reconciled
-  WhatsApp history and metadata for source reads.
+  WhatsApp history and metadata for source reads. History rows carry the chat
+  ID from the message key's remote part (`id.remote`), not from-me/to fields —
+  group history must not land in the 1:1 chat with the same contact.
 - `gateway/daemon.py`: standalone Python controller. Starts/stops bridge and
   web-source, polls bridge messages, owns WAL/replay, builds `MessageEvent`s,
   calls memU, sends responses, and persists transcript rows in Channels state.
