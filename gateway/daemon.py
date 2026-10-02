@@ -985,6 +985,9 @@ class ChannelsDaemon:
             self._db.append_message(entry.session_id, "assistant", response_text)
             return response_text
         except MemuClientError as exc:
+            if exc.code == "soul_paused":
+                logger.warning("Soul paused; source input retained for %s. Retry in launcher.", conversation_id)
+                return ""
             error_msg = (
                 f"memU turn failed: {exc}"
                 if getattr(exc, "status_code", None) is None

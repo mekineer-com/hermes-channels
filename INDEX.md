@@ -38,6 +38,9 @@ old Hermes framework. The intended shape is smaller:
   claim/mark operations. At startup it reads the canonical mcp-owned owner and
   exact soul list; channel configuration selects existing identity and never
   creates it.
+  A structured `soul_paused` refusal retains the incoming user row without
+  sending a failure notice or saving assistant error dialogue. Recovery lives
+  in the launcher's scoped failure/Retry meter, not WhatsApp dialogue.
 - `gateway/memu_policy.py`: channel policy lookup from `data/memu.json`.
 
 ## Why This Shape Exists

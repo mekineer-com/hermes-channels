@@ -31,6 +31,14 @@ class MemuClientError(RuntimeError):
         super().__init__(message)
         self.status_code = status_code
         self.response_body = response_body
+        self.code = None
+        if status_code == 409 and response_body:
+            try:
+                detail = json.loads(response_body).get("detail")
+                if isinstance(detail, dict):
+                    self.code = detail.get("code")
+            except (ValueError, AttributeError):
+                pass
 
 
 def _content_to_text(content: Any) -> str:

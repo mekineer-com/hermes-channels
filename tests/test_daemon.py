@@ -984,6 +984,25 @@ def test_handle_turn_policy_listen_only_disallows_public_response(tmp_path, monk
 # ---------------------------------------------------------------------------
 
 
+def test_paused_soul_keeps_user_input_without_error_dialogue(tmp_path, monkeypatch):
+    async def run():
+        class PausedMemu(FakeMemu):
+            def memu_turn(self, **kwargs):
+                raise MemuClientError("Paused", status_code=409, response_body='{"detail":{"code":"soul_paused"}}')
+
+        daemon = make_daemon(tmp_path, monkeypatch, PausedMemu())
+        monkeypatch.setattr("gateway.daemon.send_text", lambda *_args: pytest.fail("Pause must not send fake dialogue"))
+        message = event()
+        assert await daemon._handle_turn(message, "agent:main:whatsapp:dm:123@lid") == ""
+        session_id = next(iter(daemon._session_entries.values())).session_id
+        assert [row["role"] for row in daemon._db.get_messages(session_id)] == ["user"]
+        assert await daemon._handle_turn(message, "agent:main:whatsapp:dm:123@lid") == ""
+        assert len(daemon._db.get_messages(session_id)) == 1
+        await daemon.disconnect()
+
+    asyncio.run(run())
+
+
 def test_memu_exception_notifies_self_dm_and_persists_error_rows(tmp_path, monkeypatch):
     async def run():
         class FailingMemu(FakeMemu):
