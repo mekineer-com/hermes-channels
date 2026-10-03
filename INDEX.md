@@ -100,7 +100,9 @@ Hermes:
   intended behavior; background/web-source history is responsible for content
   recovery, not the live turn payload.
 - WAL marked processed on failure is intentional to avoid retry storms. The user
-  receives an error notice and the message remains persisted.
+  receives an error notice and the message remains persisted. A structured
+  `soul_paused` refusal is different: retain the input without an error notice
+  or assistant dialogue; the launcher supplies recovery.
 - `_drop_orphan_pending` clears active source keys but leaves WAL unmarked for
   replay.
 - `whatsapp_wal.append()` must increment WAL seq only after durable append.
