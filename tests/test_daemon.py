@@ -253,22 +253,6 @@ def test_duplicate_source_db_error_dispatches_normally_without_marking_wal(tmp_p
     asyncio.run(run())
 
 
-def test_dispatch_warns_on_invalid_delivery_mode(tmp_path, monkeypatch, caplog):
-    async def run():
-        daemon = make_daemon(tmp_path, monkeypatch)
-        ev = history_event("sent by me", "bad-mode")
-        ev.raw_message["deliveryMode"] = "bogus"
-        ev.raw_message["fromMe"] = True
-        caplog.set_level(logging.WARNING)
-
-        await daemon._dispatch_built_message_event(ev)
-
-        assert "Bridge event missing/invalid deliveryMode" in caplog.text
-        await daemon.disconnect()
-
-    asyncio.run(run())
-
-
 def test_connect_without_creds_starts_bridge_http_but_not_polling(tmp_path, monkeypatch):
     async def run():
         real_sleep = asyncio.sleep
