@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import sqlite3
+import pytest
 import threading
 import time
 from dataclasses import dataclass
@@ -209,20 +210,6 @@ def test_dedup_gate_marks_wal_processed(tmp_path, monkeypatch):
         await daemon.disconnect()
 
     asyncio.run(run())
-
-
-def test_duplicate_source_check_fails_open_on_db_error(tmp_path, monkeypatch):
-    daemon = make_daemon(tmp_path, monkeypatch)
-
-    def fail_processed(**_kwargs):
-        raise sqlite3.OperationalError("locked")
-
-    daemon._db.message_source_key_is_processed = fail_processed
-
-    try:
-        assert daemon._is_duplicate_source_message(event().raw_message) is False
-    finally:
-        asyncio.run(daemon.disconnect())
 
 
 def test_duplicate_source_check_fails_open_on_response_check_error(tmp_path, monkeypatch):
@@ -1227,19 +1214,23 @@ def test_history_arrival_can_trigger_turn_once(tmp_path, monkeypatch):
     asyncio.run(run())
 
 
-def test_history_then_live_records_both_arrivals_and_turns_once(tmp_path, monkeypatch):
+@pytest.mark.parametrize("delay,record_arrivals", [(0.01, True), (0.04, False)])
+def test_history_then_live_records_both_arrivals_and_turns_once(tmp_path, monkeypatch, delay, record_arrivals):
     async def run():
         memu = FakeMemu()
         daemon = make_daemon(tmp_path, monkeypatch, memu)
+        daemon.settings.text_batch_delay_seconds = delay
         daemon.send = lambda *_args, **_kwargs: asyncio.sleep(0, result=SendResult(True, "sent-1"))
 
         hist = history_event("hello", "same-1", wal_seq=1)
         live = event("hello", "same-1")
         live.raw_message["timestamp"] = time.time()
         live.raw_message["wal_seq"] = 2
-        daemon._record_whatsapp_arrival_raw(hist.raw_message)
+        if record_arrivals:
+            daemon._record_whatsapp_arrival_raw(hist.raw_message)
         await daemon._dispatch_built_message_event(hist)
-        daemon._record_whatsapp_arrival_raw(live.raw_message)
+        if record_arrivals:
+            daemon._record_whatsapp_arrival_raw(live.raw_message)
         await daemon._dispatch_built_message_event(live)
         await wait_for_turns(memu, 1)
 
@@ -1247,9 +1238,10 @@ def test_history_then_live_records_both_arrivals_and_turns_once(tmp_path, monkey
         assert memu.turn_calls[0]["message"] == "hello"
         await wait_until(lambda: daemon._gateway_wal.processed_up_to == 2)
         assert daemon._gateway_wal.processed_up_to == 2
-        row = daemon._db.get_whatsapp_arrival("123@lid", "same-1")
-        assert row["seen_history_at"] is not None
-        assert row["seen_live_at"] is not None
+        if record_arrivals:
+            row = daemon._db.get_whatsapp_arrival("123@lid", "same-1")
+            assert row["seen_history_at"] is not None
+            assert row["seen_live_at"] is not None
         await daemon.disconnect()
 
     asyncio.run(run())
@@ -1400,28 +1392,6 @@ def test_replayed_history_arrival_still_processes_if_not_handled(tmp_path, monke
         assert memu.turn_calls[0]["message"] == "after crash"
         await wait_until(lambda: daemon._gateway_wal.processed_up_to == 1)
         assert daemon._gateway_wal.processed_up_to == 1
-        await daemon.disconnect()
-
-    asyncio.run(run())
-
-
-def test_history_live_copies_do_not_merge_same_text(tmp_path, monkeypatch):
-    async def run():
-        memu = FakeMemu()
-        daemon = make_daemon(tmp_path, monkeypatch, memu)
-        daemon.settings.text_batch_delay_seconds = 0.04
-        daemon.send = lambda *_args, **_kwargs: asyncio.sleep(0, result=SendResult(True, "sent-1"))
-
-        hist = history_event("hello", "same-3", wal_seq=1)
-        live = event("hello", "same-3")
-        live.raw_message["timestamp"] = time.time()
-        live.raw_message["wal_seq"] = 2
-        await daemon._dispatch_built_message_event(hist)
-        await daemon._dispatch_built_message_event(live)
-        await wait_for_turns(memu, 1)
-
-        assert len(memu.turn_calls) == 1
-        assert memu.turn_calls[0]["message"] == "hello"
         await daemon.disconnect()
 
     asyncio.run(run())

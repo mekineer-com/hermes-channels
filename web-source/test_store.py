@@ -54,18 +54,6 @@ class StoreTest(unittest.TestCase):
             """
         ).fetchone()
 
-    def test_ciphers_do_not_degrade_decrypted_message(self):
-        store.upsert_message(self.con, row())
-        store.upsert_message(
-            self.con,
-            row(source="event:message_ciphertext", body="", msg_type="ciphertext"),
-        )
-
-        got = self.fetch_message()
-        self.assertEqual(got["type"], "chat")
-        self.assertEqual(got["body"], "hello")
-        self.assertEqual(got["source"], "event:message")
-
     def test_lower_rank_event_cannot_clobber_stable_fields(self):
         store.upsert_message(
             self.con,
@@ -90,6 +78,9 @@ class StoreTest(unittest.TestCase):
         self.assertEqual(got["from_me"], 0)
         self.assertEqual(got["timestamp"], 100)
         self.assertEqual(got["has_media"], 1)
+        self.assertEqual(got["type"], "chat")
+        self.assertEqual(got["body"], "hello")
+        self.assertEqual(got["source"], "event:message")
 
     def test_edit_enriches_body_and_source(self):
         store.upsert_message(self.con, row())

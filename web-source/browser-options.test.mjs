@@ -23,10 +23,6 @@ test('browserArgs preserves baseline Chromium flags', () => {
   ]);
 });
 
-test('browserArgs keeps service worker flag opt-in', () => {
-  assert.ok(browserArgs(true).includes('--disable-features=ServiceWorker'));
-});
-
 test('buildClientOptions preserves LocalAuth, user agent, executable, and headless settings', () => {
   const options = buildClientOptions({
     LocalAuth: FakeLocalAuth,

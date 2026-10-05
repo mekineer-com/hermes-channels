@@ -29,6 +29,7 @@ def test_canonical_whatsapp_jid_upgrades_phone_via_forward_bridge_mapping(tmp_pa
 
     assert canonical_whatsapp_jid("15551234567@s.whatsapp.net") == "999999999999999@lid"
     assert canonical_whatsapp_jid("15551234567@c.us") == "999999999999999@lid"
+    assert canonical_whatsapp_jid("999999999999999@lid") == "999999999999999@lid"
     assert whatsapp_jid_aliases("999999999999999@lid") >= {
         "15551234567@s.whatsapp.net",
         "15551234567@c.us",

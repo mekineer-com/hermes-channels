@@ -2,7 +2,6 @@ import json
 
 from gateway.contact_store import WhatsAppContactStore
 from gateway.whatsapp_identity import to_whatsapp_jid
-from gateway.whatsapp_seam import canonical_whatsapp_jid
 
 
 def test_to_whatsapp_jid_expands_bare_phone_and_preserves_lid():
@@ -10,16 +9,6 @@ def test_to_whatsapp_jid_expands_bare_phone_and_preserves_lid():
     assert to_whatsapp_jid("999999999999999@lid") == "999999999999999@lid"
     assert to_whatsapp_jid("15551234567:47@s.whatsapp.net") == "15551234567@s.whatsapp.net"
     assert to_whatsapp_jid("alice") == "alice"
-
-
-def test_canonical_whatsapp_jid_prefers_lid_when_mapping_exists(tmp_path, monkeypatch):
-    monkeypatch.setenv("CHANNELS_HOME", str(tmp_path))
-    session_dir = tmp_path / "whatsapp" / "session"
-    session_dir.mkdir(parents=True)
-    (session_dir / "lid-mapping-15551234567.json").write_text(json.dumps("999999999999999"), encoding="utf-8")
-
-    assert canonical_whatsapp_jid("15551234567@s.whatsapp.net") == "999999999999999@lid"
-    assert canonical_whatsapp_jid("999999999999999@lid") == "999999999999999@lid"
 
 
 def test_contact_store_merges_phone_record_when_lid_mapping_arrives(tmp_path, monkeypatch):
