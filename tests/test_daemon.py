@@ -493,6 +493,8 @@ def test_turn_payload_and_respond_route(tmp_path, monkeypatch):
         assistant_row = next(row for row in rows if row["role"] == "assistant")
         assert assistant_row["source_chat_id"] == "123@lid"
         assert assistant_row["source_message_id"] == "provider-1"
+        assert assistant_row["sender_id"] == "soul:soul"
+        assert assistant_row["sender_name"] == "soul"
         await daemon.disconnect()
 
     asyncio.run(run())
@@ -515,6 +517,8 @@ def test_private_route_goes_to_self_dm(tmp_path, monkeypatch):
         rows = daemon._db.get_messages(session_id)
         assert rows[-1]["role"] == "assistant"
         assert rows[-1]["content"] == ""
+        assert rows[-1]["sender_id"] == "soul:soul"
+        assert rows[-1]["sender_name"] == "soul"
         await daemon.disconnect()
 
     asyncio.run(run())
@@ -1086,20 +1090,66 @@ def test_persist_history_event_skips_message_older_than_active_since(tmp_path, m
     asyncio.run(run())
 
 
-def test_persist_history_event_assistant_role_hint_shapes_soul_sender(tmp_path, monkeypatch):
+@pytest.mark.parametrize("speaker_hint, expected", [(None, None), ("", None), ("Beacon", "Beacon")])
+def test_persist_history_event_assistant_role_hint_shapes_soul_sender(tmp_path, monkeypatch, speaker_hint, expected):
     async def run():
         daemon = make_daemon(tmp_path, monkeypatch)
         daemon.settings.soul_id = "soul-x"
         ev = event("soul said hi", "m1")
         ev.raw_message["speakerRoleHint"] = "assistant"
+        if speaker_hint is not None:
+            ev.raw_message["speakerNameHint"] = speaker_hint
 
         daemon._persist_history_event(ev)
 
         entry = daemon._session_entries[build_session_key(ev.source)]
         rows = daemon._db.get_messages(entry.session_id)
         assert rows[0]["role"] == "assistant"
-        assert rows[0]["sender_name"] == "soul-x"
-        assert rows[0]["sender_id"] == "soul:soul-x"
+        assert rows[0]["sender_name"] == expected
+        assert rows[0]["sender_id"] == (f"soul:{expected}" if expected else None)
+        assert rows[0]["source_chat_id"] == "123@lid"
+        assert rows[0]["source_message_id"] == "m1"
+        await daemon.disconnect()
+
+    asyncio.run(run())
+
+
+def test_soul_switch_keeps_reply_senders_and_late_history_in_shared_session(tmp_path, monkeypatch):
+    async def run():
+        daemon = make_daemon(tmp_path, monkeypatch)
+        with sqlite3.connect(tmp_path / "state.db") as conn:
+            conn.execute("INSERT INTO souls(soul_id, active_since) VALUES(?, ?)", ("Ardent", 50.0))
+        session_ids = []
+        for index, soul in enumerate(("Ardent", "Beacon", "Ardent")):
+            daemon.settings.soul_id = soul
+            ev = event(f"owner turn {index}", f"owner-{index}")
+            ev.raw_message["senderId"] = "owner@lid"
+            ev.raw_message["senderName"] = "Fictional Owner"
+            response = await daemon._handle_turn(ev, build_session_key(ev.source))
+            await daemon._handle_response_delivery(ev, SendResult(True, f"reply-{index}"), response)
+            session_ids.append(daemon._session_entries[build_session_key(ev.source)].session_id)
+        with sqlite3.connect(tmp_path / "state.db") as conn:
+            before_history = conn.execute("SELECT id, source_message_id FROM messages ORDER BY id").fetchall()
+        activity = daemon._session_entries[build_session_key(ev.source)].updated_at
+        late = history_event("Beacon's late caption", "late-beacon")
+        late.raw_message.update(speakerRoleHint="assistant", speakerNameHint="Beacon", fromMe=True, hasMedia=True)
+        await daemon._dispatch_built_message_event(late)
+        rows = daemon._db.get_messages(session_ids[0])
+        assert len(set(session_ids)) == 1
+        assert [(row["sender_id"], row["sender_name"]) for row in rows if row["role"] == "assistant"] == [
+            ("soul:Ardent", "Ardent"), ("soul:Beacon", "Beacon"),
+            ("soul:Ardent", "Ardent"), ("soul:Beacon", "Beacon"),
+        ]
+        assert [row["sender_name"] for row in rows if row["role"] == "user"] == ["Fictional Owner"] * 3
+        with sqlite3.connect(tmp_path / "state.db") as conn:
+            after_history = conn.execute("SELECT id, source_message_id FROM messages ORDER BY id").fetchall()
+        assert after_history[:-1] == before_history
+        assert [source_id for _, source_id in after_history] == [
+            "owner-0", "reply-0", "owner-1", "reply-1", "owner-2", "reply-2", "late-beacon",
+        ]
+        assert daemon._session_entries[build_session_key(ev.source)].updated_at == activity
+        assert len(daemon._memu_client.turn_calls) == 3
+        assert daemon._db.get_soul_active_since("Ardent") == 50.0
         await daemon.disconnect()
 
     asyncio.run(run())

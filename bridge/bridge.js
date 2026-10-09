@@ -157,6 +157,12 @@ function splitLongMessage(message, maxLength = MAX_MESSAGE_LENGTH) {
   return chunks;
 }
 
+function formatOutgoingMessages(message, maxLength = MAX_MESSAGE_LENGTH) {
+  const bodyLimit = maxLength - formatOutgoingMessage('').length;
+  if (bodyLimit < 1) throw new RangeError('Reply prefix exceeds message limit');
+  return splitLongMessage(message, bodyLimit).map(formatOutgoingMessage);
+}
+
 function normalizeWhatsAppId(value) {
   return identity.normalizeId(value);
 }
@@ -452,7 +458,7 @@ app.post('/send', async (req, res) => {
 
   try {
     const hadUnreadBeforeSend = presence.hasUnreadMessages(chatId);
-    const chunks = splitLongMessage(formatOutgoingMessage(message));
+    const chunks = formatOutgoingMessages(message);
     const messageIds = [];
     for (let i = 0; i < chunks.length; i += 1) {
       const sent = await sendWithTimeout(chatId, { text: chunks[i] });
@@ -490,7 +496,7 @@ app.post('/edit', async (req, res) => {
   try {
     const hadUnreadBeforeSend = presence.hasUnreadMessages(chatId);
     const key = { id: messageId, fromMe: true, remoteJid: chatId };
-    const chunks = splitLongMessage(formatOutgoingMessage(message));
+    const chunks = formatOutgoingMessages(message);
     const messageIds = [];
 
     await sendWithTimeout(chatId, { text: chunks[0], edit: key });
@@ -539,7 +545,8 @@ app.post('/send-media', async (req, res) => {
     return res.status(503).json({ error: 'Not connected to WhatsApp' });
   }
 
-  const { chatId, filePath, mediaType, caption, fileName } = req.body;
+  const { chatId, filePath, mediaType, caption: rawCaption, fileName } = req.body;
+  const caption = rawCaption ? formatOutgoingMessage(rawCaption) : undefined;
   if (!chatId || !filePath) {
     return res.status(400).json({ error: 'chatId and filePath are required' });
   }

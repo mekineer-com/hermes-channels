@@ -86,18 +86,20 @@ function extractTextAndMedia(messageContent) {
 function parseDecoratedAssistantBody(body, replyPrefix) {
   const text = String(body || '');
   if (!text) return null;
+  const match = text.match(/^\s*✦\s*\*?([^*:\n]{1,80})\*?:\s*(.*)$/s);
+  if (match) {
+    return {
+      body: String(match[2] || '').trimStart(),
+      speakerName: String(match[1] || '').trim(),
+    };
+  }
   if (replyPrefix && text.startsWith(replyPrefix)) {
     return {
       body: text.slice(replyPrefix.length).trimStart(),
       speakerName: '',
     };
   }
-  const match = text.match(/^\s*✦\s*\*?([^*:\n]{1,80})\*?:\s*(.*)$/s);
-  if (!match) return null;
-  return {
-    body: String(match[2] || '').trimStart(),
-    speakerName: String(match[1] || '').trim(),
-  };
+  return null;
 }
 
 export function createMessageIngest(ctx) {

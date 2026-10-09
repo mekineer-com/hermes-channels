@@ -978,11 +978,17 @@ class ChannelsDaemon:
                 return ""
             if response_target == "private" and source.platform == "whatsapp" and response_text:
                 self._route_whatsapp_notice_to_self_dm(response_text, conversation_id, "PRIVATE reply")
-                self._db.append_message(entry.session_id, "assistant", "")
+                self._db.append_message(
+                    entry.session_id, "assistant", "",
+                    sender_id=f"soul:{self.settings.soul_id}", sender_name=self.settings.soul_id,
+                )
                 return ""
             if not response_text:
                 raise MemuClientError("memU turn returned empty response", response_body=json.dumps(turn_out, default=str))
-            self._db.append_message(entry.session_id, "assistant", response_text)
+            self._db.append_message(
+                entry.session_id, "assistant", response_text,
+                sender_id=f"soul:{self.settings.soul_id}", sender_name=self.settings.soul_id,
+            )
             return response_text
         except MemuClientError as exc:
             if exc.code == "soul_paused":
@@ -1508,7 +1514,7 @@ class ChannelsDaemon:
         role_hint = str(raw.get("speakerRoleHint") or "").strip().lower()
         role = "assistant" if role_hint == "assistant" else "user"
         if role == "assistant":
-            speaker_name = self.settings.soul_id or str(raw.get("speakerNameHint") or raw.get("senderName") or "").strip()
+            speaker_name = str(raw.get("speakerNameHint") or "").strip()
             sender_name = speaker_name or None
             sender_id = f"soul:{speaker_name}" if speaker_name else None
         else:

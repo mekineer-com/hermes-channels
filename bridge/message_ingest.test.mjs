@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 
 import { createMessageIngest } from './message_ingest.js';
 
-function makeIngest({ sock = { user: { id: '111:1@s.whatsapp.net', lid: '111@lid', name: 'Me' } } } = {}) {
+function makeIngest({ sock = { user: { id: '111:1@s.whatsapp.net', lid: '111@lid', name: 'Me' } }, replyPrefix = '' } = {}) {
   const queued = [];
   const rememberedChats = [];
   const normalizeId = (value) => String(value || '').trim().replace(/:.*@/, '@');
@@ -42,7 +42,7 @@ function makeIngest({ sock = { user: { id: '111:1@s.whatsapp.net', lid: '111@lid
       debug: false,
       documentCacheDir: '/tmp',
       imageCacheDir: '/tmp',
-      replyPrefix: '',
+      replyPrefix,
       revokeStubType: 1,
       sessionDir: '/tmp',
       startupReplayGraceSeconds: 120,
@@ -129,4 +129,25 @@ test('handleUpdate queues revokes only for delete updates', () => {
   assert.equal(queued[0].deliveryMode, 'revoke');
   assert.equal(queued[0].messageId, 'gone');
   assert.equal(queued[0].chatId, '222@s.whatsapp.net');
+});
+
+test('history and live ingest keep decorated speakers independent of the active prefix', async () => {
+  for (const active of ['Ardent', 'Beacon']) {
+    for (const surface of ['history', 'live']) {
+      const { ingest, queued } = makeIngest({ replyPrefix: `✦ ${active}: ` });
+      const messages = ['Ardent', 'Beacon', 'Ardent'].map((speaker, i) => ({
+        key: { remoteJid: '111@s.whatsapp.net', id: `reply-${i}`, fromMe: true },
+        message: i === 1 && surface === 'history'
+          ? { imageMessage: { caption: `✦ ${speaker}: caption` } }
+          : { conversation: `✦ ${speaker}: ${i === 1 ? 'caption' : 'reply'}` },
+        messageTimestamp: Math.floor(Date.now() / 1000),
+      }));
+      if (surface === 'history') await ingest.enqueueHistoryMessages({ messages });
+      else await ingest.handleUpsert({ type: 'notify', messages });
+      assert.deepEqual(queued.map(row => row.speakerNameHint), ['Ardent', 'Beacon', 'Ardent']);
+      assert.deepEqual(queued.map(row => row.body), ['reply', 'caption', 'reply']);
+      assert.deepEqual(queued.map(row => row.messageId), ['reply-0', 'reply-1', 'reply-2']);
+      assert.ok(queued.every(row => row.speakerRoleHint === 'assistant' && row.deliveryMode === 'persist_only'));
+    }
+  }
 });
