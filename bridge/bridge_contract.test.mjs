@@ -44,13 +44,13 @@ test('bridge exposes current pairing QR through health only while unpaired', () 
   assert.match(bridgeSource, /qr:\s*currentQr/);
 });
 
-test('send/edit prefix every bounded fragment and media prefixes only nonempty captions', async () => {
+test('send/edit and media identify the Soul, including text before voice', async () => {
   const routes = {};
   const sent = [];
   const cached = [];
   const prefix = '✦ Beacon: ';
   const context = {
-    WHATSAPP_MODE: 'self-chat', HAS_CUSTOM_REPLY_PREFIX: true, REPLY_PREFIX: prefix,
+    WHATSAPP_MODE: 'self-chat', REPLY_PREFIX: prefix,
     MAX_MESSAGE_LENGTH: 40, CHUNK_DELAY_MS: 0,
     app: { post: (route, handler) => { routes[route] = handler; } },
     sock: {}, socketLifecycle: { isConnected: () => true },
@@ -89,16 +89,37 @@ test('send/edit prefix every bounded fragment and media prefixes only nonempty c
     for (const caption of ['caption', '']) {
       await routes['/send-media']({ body: { chatId: 'fictional@lid', filePath: 'file.png', mediaType, caption } }, res);
       assert.equal(response.success, true);
-      assert.equal(sent.at(-1).caption, caption ? `${prefix}${caption}` : undefined);
+      assert.equal(sent.at(-1).caption, `${prefix}${caption}`);
       assert.equal(cached.at(-1).caption, sent.at(-1).caption);
     }
   }
+  context.MIME_MAP = {opus: 'audio/ogg'};
+  for (const caption of ['', 'voice caption']) {
+    sent.length = 0;
+    await routes['/send-media']({body: {chatId: 'fictional@lid', filePath: 'file.opus', mediaType: 'audio', caption}}, res);
+    assert.equal(response.success, true);
+    assert.equal(sent.length, 2);
+    assert.equal(sent[0].text, `${prefix}${caption}`);
+    assert.ok(sent[1].audio);
+    assert.equal(sent[1].ptt, true);
+  }
   context.WHATSAPP_MODE = 'bot';
-  context.HAS_CUSTOM_REPLY_PREFIX = false;
-  assert.equal(runInNewContext("formatOutgoingMessages('plain')[0]", context), 'plain');
-  context.HAS_CUSTOM_REPLY_PREFIX = true;
-  context.REPLY_PREFIX = '';
-  assert.equal(runInNewContext("formatOutgoingMessages('plain')[0]", context), 'plain');
+  assert.equal(runInNewContext("formatOutgoingMessages('plain')[0]", context), `${prefix}plain`);
   context.REPLY_PREFIX = 'x'.repeat(40);
   assert.throws(() => runInNewContext("formatOutgoingMessages('plain')", context), /prefix exceeds/);
+});
+
+test('selected Soul alone defines the prefix; pair-only cannot send without one', () => {
+  const declaration = bridgeSource.slice(bridgeSource.indexOf('const SOUL_ID ='), bridgeSource.indexOf('const MAX_MESSAGE_LENGTH'));
+  for (const legacy of ['', 'custom prefix']) {
+    const context = {getArg: () => 'Exact Soul', PAIR_ONLY: false, process: {env: {WHATSAPP_REPLY_PREFIX: legacy}}};
+    runInNewContext(declaration + '\nglobalThis.prefix = REPLY_PREFIX;', context);
+    assert.equal(context.prefix, '✦ Exact Soul: ');
+  }
+  const context = {getArg: () => '', PAIR_ONLY: true, SEND_TIMEOUT_MS: 1};
+  runInNewContext(declaration + '\n' + bridgeSource.slice(
+    bridgeSource.indexOf('function sendWithTimeout('), bridgeSource.indexOf('function formatOutgoingMessage('),
+  ), context);
+  assert.throws(() => runInNewContext("sendWithTimeout('chat', {})", context), /Select a Soul/);
+  assert.throws(() => runInNewContext(declaration, {...context, PAIR_ONLY: false}), /selected Soul/);
 });

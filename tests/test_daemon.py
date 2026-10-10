@@ -2,7 +2,6 @@ import asyncio
 import json
 import logging
 import sqlite3
-import pytest
 import threading
 import time
 from dataclasses import dataclass
@@ -325,6 +324,48 @@ def test_connect_without_creds_starts_bridge_http_but_not_polling(tmp_path, monk
         assert replay_calls == []
         assert poll_calls == []
         await daemon.disconnect()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("prefix", ["✦ soul: ", "✦ OtherSoul: ", None])
+def test_connect_adopts_only_selected_soul_bridge(tmp_path, monkeypatch, prefix):
+    async def run():
+        daemon = ChannelsDaemon(settings(), memu_client=FakeMemu())
+        daemon.whatsapp_home = tmp_path / "whatsapp"
+        daemon._session_path = daemon.whatsapp_home / "session"
+        daemon._bridge_script = tmp_path / "bridge.js"
+        daemon._bridge_script.write_text("// fixture bridge\n", encoding="utf-8")
+        monkeypatch.setattr(daemon_module.shutil, "which", lambda _name: "/fake/node")
+        monkeypatch.setattr(daemon_module, "_file_content_hash", lambda _path: "same-hash")
+        monkeypatch.setattr(daemon_module.subprocess, "run", lambda *_a, **_kw: type("Result", (), {"returncode": 0})())
+        killed = []
+        monkeypatch.setattr(daemon_module, "_kill_stale_bridge_by_pidfile", lambda *_a: killed.append(True))
+
+        def stop_at_restart(_port):
+            raise RuntimeError("restart reached")
+
+        monkeypatch.setattr(daemon_module, "_kill_port_process", stop_at_restart)
+        daemon._acquire_session_lock = lambda: True
+        daemon._start_web_source = lambda: True
+
+        async def health():
+            return {"status": "connected", "scriptHash": "same-hash", "replyPrefix": prefix}
+
+        async def idle():
+            return None
+
+        daemon._bridge_health = health
+        daemon._replay_gateway_wal = idle
+        daemon._poll_messages = idle
+        if prefix == "✦ soul: ":
+            assert await daemon.connect() is True
+            assert killed == []
+            await daemon.disconnect()
+        else:
+            with pytest.raises(RuntimeError, match="restart reached"):
+                await daemon.connect()
+            assert killed == [True]
 
     asyncio.run(run())
 
@@ -893,6 +934,20 @@ def test_handle_response_delivery_db_error_does_not_propagate(tmp_path, monkeypa
 
 # ---------------------------------------------------------------------------
 # T4: _handle_turn routing
+
+
+@pytest.mark.parametrize("from_me", [None, False, True])
+def test_turn_sends_explicit_owner_evidence_only_for_own_phone_message(tmp_path, monkeypatch, from_me):
+    async def run():
+        memu = FakeMemu(turn={"ok": True, "response_target": "listen"})
+        daemon = make_daemon(tmp_path, monkeypatch, memu)
+        ev = event()
+        if from_me is not None:
+            ev.raw_message["fromMe"] = from_me
+        await daemon._handle_turn(ev, build_session_key(ev.source))
+        assert memu.turn_calls[0]["source_owner_id"] == ("Fictional Owner" if from_me is True else None)
+        await daemon.disconnect()
+    asyncio.run(run())
 # ---------------------------------------------------------------------------
 
 

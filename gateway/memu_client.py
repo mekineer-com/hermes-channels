@@ -76,10 +76,6 @@ def normalize_history_for_memu(
     if not isinstance(history, list):
         return []
 
-    role_to_name = {}
-    if soul_name:
-        role_to_name["assistant"] = soul_name
-
     normalized: list[dict[str, Any]] = []
     for msg in history:
         if not isinstance(msg, dict):
@@ -93,16 +89,17 @@ def normalize_history_for_memu(
             continue
 
         out: dict[str, Any] = {"content": text}
-        if role == "assistant":
-            out["role"] = role
         # Preserve explicit participant names from transcript rows.
         # Never force-fill user names from session metadata: in multi-chat
         # scenarios that can stamp the wrong person across a DM transcript.
         name = str(msg.get("name") or "").strip()
         if not name:
             name = str(msg.get("sender_name") or "").strip()
-        if not name:
-            name = role_to_name.get(role, "")
+        sender_id = str(msg.get("sender_id") or "").strip()
+        if role == "assistant" and sender_id.startswith("soul:"):
+            name = sender_id.removeprefix("soul:")
+        if role == "assistant" and name and name == soul_name:
+            out["role"] = role
         if name:
             out["name"] = name
 
@@ -209,6 +206,7 @@ class MemuHttpClient:
         history: list[dict[str, Any]] | None = None,
         history_user_name: str | None = None,
         user_name: str | None = None,
+        source_owner_id: str | None = None,
         soul_card: str | None = None,
         debug: bool = False,
         chat_name: str | None = None,
@@ -232,6 +230,8 @@ class MemuHttpClient:
         }
         if speaker_name:
             payload["user_name"] = speaker_name
+        if source_owner_id is not None:
+            payload["source_owner_id"] = source_owner_id
         if soul_card:
             payload["soul_card"] = str(soul_card)
         # chat_name / chat_type identify the originating chat (e.g. "Alice" / "dm").

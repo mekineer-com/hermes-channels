@@ -78,11 +78,9 @@ const ALLOWED_USERS = parseAllowedUsers(process.env.WHATSAPP_ALLOWED_USERS || ''
 const PRESERVE_UNREAD_ON_SEND = envEnabled('WHATSAPP_PRESERVE_UNREAD_ON_SEND', true);
 const SEND_UNAVAILABLE_AFTER_ACTIVITY = envEnabled('WHATSAPP_SEND_UNAVAILABLE_AFTER_ACTIVITY', true);
 const ENABLE_TYPING_INDICATOR = envEnabled('WHATSAPP_ENABLE_TYPING_INDICATOR', true);
-const DEFAULT_REPLY_PREFIX = '⚕ *Hermes Agent*\n────────────\n';
-const HAS_CUSTOM_REPLY_PREFIX = process.env.WHATSAPP_REPLY_PREFIX !== undefined;
-const REPLY_PREFIX = HAS_CUSTOM_REPLY_PREFIX
-  ? process.env.WHATSAPP_REPLY_PREFIX.replace(/\\n/g, '\n')
-  : DEFAULT_REPLY_PREFIX;
+const SOUL_ID = getArg('soul-id', '').trim();
+if (!SOUL_ID && !PAIR_ONLY) throw new Error('A selected Soul is required (--soul-id)');
+const REPLY_PREFIX = SOUL_ID ? `✦ ${SOUL_ID}: ` : '';
 const MAX_MESSAGE_LENGTH = parseInt(process.env.WHATSAPP_MAX_MESSAGE_LENGTH || '4096', 10);
 const CHUNK_DELAY_MS = parseInt(process.env.WHATSAPP_CHUNK_DELAY_MS || '300', 10);
 const BAILEYS_VERSION_FETCH_TIMEOUT_MS = parseInt(process.env.WHATSAPP_BAILEYS_VERSION_FETCH_TIMEOUT_MS || '5000', 10);
@@ -116,6 +114,7 @@ function sleep(ms) {
 }
 
 function sendWithTimeout(chatId, payload, timeoutMs = SEND_TIMEOUT_MS) {
+  if (!SOUL_ID) throw new Error('Select a Soul before sending');
   let timer;
   const timeoutPromise = new Promise((_, reject) => {
     timer = setTimeout(
@@ -128,10 +127,7 @@ function sendWithTimeout(chatId, payload, timeoutMs = SEND_TIMEOUT_MS) {
 }
 
 function formatOutgoingMessage(message) {
-  // Bot mode normally skips prefix (sender identity is already clear), but
-  // honor an explicit user-configured WHATSAPP_REPLY_PREFIX from config.yaml.
-  if (WHATSAPP_MODE !== 'self-chat' && !HAS_CUSTOM_REPLY_PREFIX) return message;
-  return REPLY_PREFIX ? `${REPLY_PREFIX}${message}` : message;
+  return `${REPLY_PREFIX}${message}`;
 }
 
 function splitLongMessage(message, maxLength = MAX_MESSAGE_LENGTH) {
@@ -234,7 +230,6 @@ const messageIngest = createMessageIngest({
     debug: WHATSAPP_DEBUG,
     documentCacheDir: DOCUMENT_CACHE_DIR,
     imageCacheDir: IMAGE_CACHE_DIR,
-    replyPrefix: REPLY_PREFIX,
     revokeStubType: WHATSAPP_REVOKE_STUB_TYPE,
     sessionDir: SESSION_DIR,
     startupReplayGraceSeconds: STARTUP_REPLAY_GRACE_SECONDS,
@@ -546,7 +541,7 @@ app.post('/send-media', async (req, res) => {
   }
 
   const { chatId, filePath, mediaType, caption: rawCaption, fileName } = req.body;
-  const caption = rawCaption ? formatOutgoingMessage(rawCaption) : undefined;
+  const caption = formatOutgoingMessage(rawCaption || '');
   if (!chatId || !filePath) {
     return res.status(400).json({ error: 'chatId and filePath are required' });
   }
@@ -608,6 +603,15 @@ app.post('/send-media', async (req, res) => {
         break;
     }
 
+    if (type === 'audio') {
+      const labels = formatOutgoingMessages(rawCaption || '');
+      if (!labels.length) labels.push(formatOutgoingMessage(''));
+      for (const text of labels) {
+        const label = await sendWithTimeout(chatId, { text });
+        sentStore.trackSent(label?.key?.id);
+        sentStore.storeSent(label, { conversation: text });
+      }
+    }
     const sent = await sendWithTimeout(chatId, msgPayload);
 
     sentStore.trackSent(sent?.key?.id);

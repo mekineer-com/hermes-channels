@@ -254,6 +254,7 @@ test('durable queue merges history rows into later live rows', () => {
       chatId: '12025550199@s.whatsapp.net',
       senderId: '12025550199@s.whatsapp.net',
       senderName: 'Old name',
+      fromMe: true,
       body: 'history body',
       timestamp: 1,
     });
@@ -264,6 +265,7 @@ test('durable queue merges history rows into later live rows', () => {
       chatId: '12025550199@s.whatsapp.net',
       senderId: '12025550199@s.whatsapp.net',
       senderName: 'Live name',
+      fromMe: false,
       body: 'live body',
       timestamp: 2,
     });
@@ -282,6 +284,7 @@ test('durable queue merges history rows into later live rows', () => {
     assert.equal(history.deliveryMode, 'live');
     assert.equal(history.eventType, undefined);
     assert.equal(history.senderName, 'Live name');
+    assert.equal(history.fromMe, false);
     assert.equal(history.body, 'live body');
     assert.equal(history.timestamp, 1);
     assert.equal(queueLinesAfterHistory.length, 1);

@@ -82,6 +82,15 @@ Hermes:
   not "the OpenAlma scope user". Do not send that role to memU as semantic
   speaker identity; direct memU payloads preserve `sender_name` and omit user
   role, while assistant/soul rows keep `role=assistant`.
+- Bridge events retain `fromMe` through history/live queue merging. The gateway
+  forwards the account owner ID as `source_owner_id` only for an own-phone turn;
+  the server chooses the Soul's stored human name. Sender names remain source
+  metadata; missing ownership evidence never identifies a guest as the owner.
+- Every Soul reply uses the fixed `✦ <exact Soul name>: ` label, including each
+  split text and media caption. Native voice notes have identifying text sent
+  immediately before the audio. Bot mode does not remove the label; custom
+  prefix settings are no longer read. Reusing a running bridge requires the
+  selected Soul's exact label as well as matching code.
 - `whatsapp_message_arrivals` is evidence only. It records history/live arrivals
   but is not a durable response claim and must not become a trigger/skip gate.
 - `_active_source_keys` is load-bearing. It covers the in-flight window after a

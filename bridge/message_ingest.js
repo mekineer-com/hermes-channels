@@ -83,20 +83,19 @@ function extractTextAndMedia(messageContent) {
   return { body, hasMedia, mediaType };
 }
 
-function parseDecoratedAssistantBody(body, replyPrefix) {
+function parseDecoratedAssistantBody(body) {
   const text = String(body || '');
   if (!text) return null;
-  const match = text.match(/^\s*✦\s*\*?([^*:\n]{1,80})\*?:\s*(.*)$/s);
+  const match = text.match(/^\s*✦[ \t]+(\*{0,2})([^*:\r\n]{1,80})\1:[ \t]*(.*)$/s);
   if (match) {
+    const speakerName = match[2].trim();
+    // Same filename-safe Soul names as mcp-memu-server's validate_soul_id.
+    if (!speakerName || Buffer.byteLength(speakerName, 'utf8') > 80 || speakerName.endsWith('.')
+      || /[\x00-\x1f\x7f/\\*?\[\]:"<>|]/.test(speakerName)
+      || /^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\.|$)/i.test(speakerName)) return null;
     return {
-      body: String(match[2] || '').trimStart(),
-      speakerName: String(match[1] || '').trim(),
-    };
-  }
-  if (replyPrefix && text.startsWith(replyPrefix)) {
-    return {
-      body: text.slice(replyPrefix.length).trimStart(),
-      speakerName: '',
+      body: String(match[3] || '').trimStart(),
+      speakerName,
     };
   }
   return null;
@@ -202,7 +201,7 @@ export function createMessageIngest(ctx) {
     let speakerNameHint = '';
     if (msg.key.fromMe) {
       if (sentStore.isEcho(messageId)) return false;
-      const parsed = parseDecoratedAssistantBody(body, config.replyPrefix);
+      const parsed = parseDecoratedAssistantBody(body);
       if (parsed) {
         speakerRoleHint = 'assistant';
         speakerNameHint = parsed?.speakerName || '';
@@ -235,6 +234,7 @@ export function createMessageIngest(ctx) {
       chatId,
       senderId,
       senderName: resolvedSenderName,
+      fromMe: Boolean(msg.key.fromMe),
       chatName: resolvedChatName,
       isGroup: chatId.endsWith('@g.us'),
       body,
@@ -452,7 +452,7 @@ export function createMessageIngest(ctx) {
 
       let speakerRoleHint = 'user';
       let speakerNameHint = '';
-      const decoratedAssistant = msg.key.fromMe ? parseDecoratedAssistantBody(body, config.replyPrefix) : null;
+      const decoratedAssistant = msg.key.fromMe ? parseDecoratedAssistantBody(body) : null;
       if (msg.key.fromMe && sentStore.isEcho(msg.key.id)) {
         if (config.debug) {
           console.log(JSON.stringify({
@@ -516,6 +516,7 @@ export function createMessageIngest(ctx) {
         chatId,
         senderId,
         senderName: resolvedSenderName,
+        fromMe: Boolean(msg.key.fromMe),
         chatName: resolvedChatName,
         isGroup,
         body,

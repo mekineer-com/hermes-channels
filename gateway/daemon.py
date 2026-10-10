@@ -472,7 +472,8 @@ class ChannelsDaemon:
         if health.get("status") == "connected":
             running_hash = health.get("scriptHash", "")
             disk_hash = _file_content_hash(bridge_path)
-            if running_hash and disk_hash and running_hash == disk_hash:
+            if (running_hash and disk_hash and running_hash == disk_hash
+                    and health.get("replyPrefix") == f"✦ {self.settings.soul_id}: "):
                 self._running = True
                 self._start_web_source()
                 await self._replay_gateway_wal()
@@ -487,15 +488,12 @@ class ChannelsDaemon:
         bridge_log = self.whatsapp_home / "bridge.log"
         self._bridge_log_fh = open(bridge_log, "a", encoding="utf-8")
         env = os.environ.copy()
-        # Pass the reply prefix from config so the Node bridge can use it
-        # without the user needing to set a separate env var.
-        if self.settings.reply_prefix is not None:
-            env["WHATSAPP_REPLY_PREFIX"] = self.settings.reply_prefix
         env["CHANNELS_IMAGE_CACHE_DIR"] = str(self.whatsapp_home / "image_cache")
         env["CHANNELS_AUDIO_CACHE_DIR"] = str(self.whatsapp_home / "audio_cache")
         env["CHANNELS_DOCUMENT_CACHE_DIR"] = str(self.whatsapp_home / "document_cache")
         self._bridge_process = subprocess.Popen(
-            ["node", str(bridge_path), "--port", str(self._bridge_port), "--session", str(self._session_path), "--mode", self._whatsapp_mode()],
+            ["node", str(bridge_path), "--port", str(self._bridge_port), "--session", str(self._session_path),
+             "--mode", self._whatsapp_mode(), "--soul-id", self.settings.soul_id],
             stdout=self._bridge_log_fh,
             stderr=self._bridge_log_fh,
             preexec_fn=None if _IS_WINDOWS else os.setsid,
@@ -956,6 +954,7 @@ class ChannelsDaemon:
                 history=history,
                 history_user_name=sender_name,
                 user_name=sender_name,
+                source_owner_id=self.owner_id if raw.get("fromMe") is True else None,
                 debug=False,
                 chat_name=source.chat_name,
                 chat_type=chat_type,

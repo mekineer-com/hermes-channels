@@ -80,6 +80,7 @@ const LIVE_OWNED_FIELDS = new Set([
   'body',
   'senderId',
   'senderName',
+  'fromMe',
   'chatName',
   'isGroup',
   'hasMedia',

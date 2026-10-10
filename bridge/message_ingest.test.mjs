@@ -73,6 +73,7 @@ test('handleUpsert queues a self-chat text event with current delivery fields', 
     chatId: '111@s.whatsapp.net',
     senderId: '111@s.whatsapp.net',
     senderName: 'Me',
+    fromMe: true,
     chatName: '111',
     isGroup: false,
     body: 'hello',
@@ -107,6 +108,10 @@ test('history events preserve both timestamps and prefer client send time', asyn
       message: { conversation: 'older message' },
       messageTimestamp: now,
       messageC2STimestamp: now - 10,
+    }, {
+      key: { remoteJid: '222@s.whatsapp.net', id: 'guest-history', fromMe: false },
+      message: { conversation: 'guest message' },
+      messageTimestamp: now,
     }],
   });
 
@@ -114,6 +119,7 @@ test('history events preserve both timestamps and prefer client send time', asyn
     [queued[0].timestamp, queued[0].messageTimestamp, queued[0].messageC2STimestamp],
     [now - 10, now, now - 10],
   );
+  assert.deepEqual(queued.map(row => row.fromMe), [true, false]);
 });
 
 test('handleUpdate queues revokes only for delete updates', () => {
@@ -150,4 +156,20 @@ test('history and live ingest keep decorated speakers independent of the active 
       assert.ok(queued.every(row => row.speakerRoleHint === 'assistant' && row.deliveryMode === 'persist_only'));
     }
   }
+});
+
+test('only marked Soul labels are assistant evidence, including old bold labels', async () => {
+  const { ingest, queued } = makeIngest({replyPrefix: 'Ardent: '});
+  const humanBodies = ['Ardent: human words', '[Ardent] human words', '✦Ardent: human words',
+    '✦ [Ardent]: human words', '✦ Ardent/Other: human words', '✦ CON: human words',
+    `✦ ${'é'.repeat(41)}: human words`];
+  const bodies = [...humanBodies,
+    '✦ Ardent: reply', '✦ *Ardent*: reply', '✦ **Ardent**: reply'];
+  await ingest.enqueueHistoryMessages({messages: bodies.map((body, i) => ({
+    key: {remoteJid: '111@s.whatsapp.net', id: `label-${i}`, fromMe: true},
+    message: {conversation: body}, messageTimestamp: Math.floor(Date.now() / 1000),
+  }))});
+  assert.deepEqual(queued.slice(0, humanBodies.length).map(row => row.body), humanBodies);
+  assert.ok(queued.slice(0, humanBodies.length).every(row => row.speakerRoleHint !== 'assistant'));
+  assert.ok(queued.slice(humanBodies.length).every(row => row.speakerRoleHint === 'assistant' && row.speakerNameHint === 'Ardent'));
 });
