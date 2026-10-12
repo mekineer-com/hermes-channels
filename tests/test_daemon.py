@@ -177,7 +177,8 @@ async def wait_until(predicate, *, timeout=1.0):
     assert predicate()
 
 
-def test_batching_debounce_flushes_merged_text(tmp_path, monkeypatch):
+@pytest.mark.parametrize("from_me", [False, True])
+def test_batching_debounce_flushes_merged_text(tmp_path, monkeypatch, from_me):
     async def run():
         daemon = make_daemon(tmp_path, monkeypatch)
         seen = []
@@ -188,6 +189,7 @@ def test_batching_debounce_flushes_merged_text(tmp_path, monkeypatch):
         daemon.handle_message = handle
         first = event("one", "m1")
         second = event("two", "m2")
+        first.raw_message["fromMe"] = second.raw_message["fromMe"] = from_me
         second.raw_message["wal_seq"] = 2
         daemon._enqueue_text_event(first)
         daemon._enqueue_text_event(second)
@@ -197,6 +199,50 @@ def test_batching_debounce_flushes_merged_text(tmp_path, monkeypatch):
         assert seen[0].raw_message["_wal_seqs"] == [1, 2]
         await daemon.disconnect()
 
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("first_from_me", [False, True])
+def test_dm_batches_keep_owner_and_contact_attribution_separate(tmp_path, monkeypatch, first_from_me):
+    async def run():
+        memu = FakeMemu(turn={"ok": True, "response_target": "listen"})
+        daemon = make_daemon(tmp_path, monkeypatch, memu)
+        seen, completed = [], []
+        daemon._gateway_wal.mark_processed = completed.append
+        async def handle(ev):
+            seen.append(ev)
+        daemon.handle_message = handle
+        events = []
+        for index, from_me in enumerate((first_from_me, not first_from_me, first_from_me), 1):
+            sender = "owner@lid" if from_me else "123@lid"
+            ev = await daemon._build_message_event({
+                "deliveryMode": "live", "chatId": "123@lid", "chatName": "Fictional Contact",
+                "senderId": sender, "senderName": "Fictional Owner" if from_me else "Fictional Contact",
+                "fromMe": from_me, "body": f"line {index}", "messageId": f"m{index}",
+                "isGroup": False, "timestamp": time.time(), "wal_seq": index,
+            })
+            events.append(ev)
+            daemon._enqueue_text_event(ev)
+        assert len({build_session_key(ev.source) for ev in events}) == 1
+        await asyncio.gather(*daemon._pending_text_batch_tasks.values())
+        assert len(seen) == 2
+        by_sender = {ev.raw_message["fromMe"]: ev for ev in seen}
+        assert by_sender[first_from_me].text == "line 1\nline 3"
+        assert by_sender[not first_from_me].text == "line 2"
+        for ev in seen:
+            await daemon._handle_turn(ev, build_session_key(ev.source))
+            await daemon.on_processing_complete(ev, ProcessingOutcome.SUCCESS)
+        for turn in memu.turn_calls:
+            owner = turn["source_owner_id"] == "Fictional Owner"
+            assert turn["source_owner_id"] == ("Fictional Owner" if owner else None)
+            expected = by_sender[owner]
+            assert turn["message"] == expected.text
+            assert turn["user_name"] == ("Fictional Owner" if owner else "Fictional Contact")
+        assert len(memu.turn_calls) == 2 and len(daemon._session_entries) == 1
+        assert sorted(completed) == [1, 2, 3]
+        for index in range(1, 4):
+            assert daemon._db.message_source_key_is_processed(source_chat_id="123@lid", source_message_id=f"m{index}")
+        await daemon.disconnect()
     asyncio.run(run())
 
 

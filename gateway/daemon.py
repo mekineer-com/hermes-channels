@@ -1734,7 +1734,11 @@ class ChannelsDaemon:
                 pass
 
     def _text_batch_key(self, event: MessageEvent) -> str:
-        return build_session_key(event.source, group_sessions_per_user=True)
+        key = build_session_key(event.source, group_sessions_per_user=True)
+        if event.source.platform == "whatsapp" and event.source.chat_type == "dm":
+            raw = event.raw_message if isinstance(event.raw_message, dict) else {}
+            return f"{key}:{raw.get('fromMe') is True}"
+        return key
 
     def _resolve_event_chat_name(self, data: dict[str, Any], *, is_group: bool) -> str:
         chat_name = str(data.get("chatName") or "").strip()
