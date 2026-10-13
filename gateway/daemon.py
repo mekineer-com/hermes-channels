@@ -1281,15 +1281,22 @@ class ChannelsDaemon:
             return
 
         async def _mark(status: str, *, provider_message_id: str | None = None, error: str | None = None) -> None:
-            await asyncio.to_thread(
-                self._memu_client.mark_whatsapp_outbound,
-                user_id=self.owner_id,
-                soul_id=self.settings.soul_id,
-                outbound_id=out_id,
-                status=status,
-                provider_message_id=provider_message_id,
-                error=error,
-            )
+            try:
+                await asyncio.to_thread(
+                    self._memu_client.mark_whatsapp_outbound,
+                    user_id=self.owner_id,
+                    soul_id=self.settings.soul_id,
+                    outbound_id=out_id,
+                    status=status,
+                    claimed_at=row["claimed_at"],
+                    provider_message_id=provider_message_id,
+                    error=error,
+                )
+            except MemuClientError as exc:
+                if exc.status_code != 409:
+                    raise
+                logger.warning("WhatsApp memU outbound mark conflict for %s claimed_at=%s: %s",
+                               out_id, row["claimed_at"], exc)
 
         if out_id in self._load_outbound_sent():
             await _mark("sent")

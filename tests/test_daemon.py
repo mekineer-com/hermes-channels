@@ -58,6 +58,8 @@ class FakeMemu:
 
     def claim_whatsapp_outbounds(self, **kwargs):
         self.claim_calls.append(kwargs)
+        for row in self.rows:
+            row.setdefault("claimed_at", "2040-01-02T03:04:05.000000+00:00")
         return list(self.rows)
 
     def mark_whatsapp_outbound(self, **kwargs):
@@ -646,12 +648,14 @@ def test_outbound_drain_claims_as_channels_and_marks_sent(tmp_path, monkeypatch)
                     "id": "out-1",
                     "target": "respond",
                     "response_text": "hello",
+                    "claimed_at": "2040-01-02T03:04:05.123456+00:00",
                     "origin_conversation_id": "whatsapp:dm:123@lid",
                 },
                 {
                     "id": "out-2",
                     "target": "respond",
                     "media_path": str(media),
+                    "claimed_at": "2040-01-02T03:04:06.654321Z",
                     "origin_conversation_id": "whatsapp:dm:123@lid",
                 },
             ]
@@ -672,6 +676,7 @@ def test_outbound_drain_claims_as_channels_and_marks_sent(tmp_path, monkeypatch)
         assert await daemon.drain_outbounds() == 2
         assert memu.claim_calls[0]["claimed_by"] == "channels"
         assert [call["status"] for call in memu.mark_calls] == ["sent", "sent"]
+        assert [call["claimed_at"] for call in memu.mark_calls] == [row["claimed_at"] for row in memu.rows]
         assert sent[0] == ("text", "123@lid", "hello")
         assert sent[1] == ("media", "123@lid", str(media), None)
         await daemon.disconnect()
@@ -885,6 +890,81 @@ def test_drain_skips_resend_when_out_id_already_sent(tmp_path, monkeypatch):
         assert await daemon.drain_outbounds() == 1
         assert sent == []
         assert memu.mark_calls[0]["status"] == "sent"
+        await daemon.disconnect()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("delivery", ["send", "already_sent", "missing_attachment"])
+def test_drain_mark_conflict_continues_batch_without_remark_or_resend(tmp_path, monkeypatch, caplog, delivery):
+    async def run():
+        class StaleMemu(FakeMemu):
+            def mark_whatsapp_outbound(self, **kwargs):
+                super().mark_whatsapp_outbound(**kwargs)
+                if kwargs["outbound_id"] == "out-1":
+                    raise MemuClientError("stale claim", status_code=409)
+                return {"ok": True}
+
+        memu = StaleMemu(rows=[
+            {"id": "out-1", "target": "respond", "response_text": "first",
+             "origin_conversation_id": "whatsapp:dm:123@lid"},
+            {"id": "out-2", "target": "respond", "response_text": "second",
+             "origin_conversation_id": "whatsapp:dm:123@lid"},
+        ])
+        daemon = make_daemon(tmp_path, monkeypatch, memu)
+        if delivery == "already_sent":
+            daemon._record_outbound_sent("out-1")
+        elif delivery == "missing_attachment":
+            memu.rows[0]["media_path"] = str(tmp_path / "missing.bin")
+        sent = []
+
+        async def send(chat_id, text, **_kwargs):
+            sent.append(text)
+            return SendResult(True, f"sent-{text}")
+
+        daemon.send = send
+        caplog.set_level(logging.WARNING)
+        assert await daemon.drain_outbounds() == 2
+        assert sent == (["first", "second"] if delivery == "send" else ["second"])
+        assert [(call["outbound_id"], call["status"]) for call in memu.mark_calls] == [
+            ("out-1", "failed" if delivery == "missing_attachment" else "sent"), ("out-2", "sent")]
+        assert all(call["claimed_at"] == row["claimed_at"] for call, row in zip(memu.mark_calls, memu.rows))
+        assert daemon._load_outbound_sent() == ({"out-2"} if delivery == "missing_attachment" else {"out-1", "out-2"})
+        assert any(record.levelno == logging.WARNING and all(value in record.getMessage()
+                   for value in ("out-1", memu.rows[0]["claimed_at"], "stale claim")) for record in caplog.records)
+        await daemon.disconnect()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("status_code", [500, None])
+def test_drain_nonconflict_mark_error_remains_visible_with_existing_failure_policy(tmp_path, monkeypatch, status_code):
+    async def run():
+        class BrokenMemu(FakeMemu):
+            def mark_whatsapp_outbound(self, **kwargs):
+                super().mark_whatsapp_outbound(**kwargs)
+                raise MemuClientError("mark unavailable", status_code=status_code)
+
+        memu = BrokenMemu(rows=[
+            {"id": "out-1", "target": "respond", "response_text": "first",
+             "origin_conversation_id": "whatsapp:dm:123@lid"},
+            {"id": "out-2", "target": "respond", "response_text": "second",
+             "origin_conversation_id": "whatsapp:dm:123@lid"},
+        ])
+        daemon = make_daemon(tmp_path, monkeypatch, memu)
+        sent = []
+
+        async def send(chat_id, text, **_kwargs):
+            sent.append(text)
+            return SendResult(True, "sent-first")
+
+        daemon.send = send
+        with pytest.raises(MemuClientError, match="mark unavailable") as exc:
+            await daemon.drain_outbounds()
+        assert exc.value.status_code == status_code
+        assert sent == ["first"]
+        assert [call["status"] for call in memu.mark_calls] == ["sent", "failed"]
+        assert daemon._load_outbound_sent() == {"out-1"}
         await daemon.disconnect()
 
     asyncio.run(run())

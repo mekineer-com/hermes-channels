@@ -73,6 +73,34 @@ def test_turn_forwards_owner_evidence_without_changing_sender_name(monkeypatch):
     assert all(body["user_name"] == "WhatsApp Display" for _, body in seen)
 
 
+def test_mark_outbound_requires_and_forwards_exact_claim_timestamp(monkeypatch):
+    client = MemuHttpClient(base_url="http://memu.invalid")
+    seen = []
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def read(self):
+            return b'{"ok": true}'
+
+    def fake_urlopen(request, timeout):
+        seen.append((request.full_url, json.loads(request.data)))
+        return Response()
+
+    monkeypatch.setattr("gateway.memu_client.urllib.request.urlopen", fake_urlopen)
+    kwargs = dict(user_id="TestOwner", soul_id="TestSoul", outbound_id="out-1", status="sent")
+    with pytest.raises(TypeError, match="claimed_at"):
+        client.mark_whatsapp_outbound(**kwargs)
+    claimed_at = "2040-01-02T03:04:05.123456+00:00"
+    assert client.mark_whatsapp_outbound(**kwargs, claimed_at=claimed_at) == {"ok": True}
+    assert seen == [("http://memu.invalid/integration/whatsapp/outbounds/mark",
+                     {**kwargs, "claimed_at": claimed_at})]
+
+
 def test_foreign_soul_history_does_not_inherit_requesting_soul():
     rows = normalize_history_for_memu([
         {"role": "assistant", "content": "a", "sender_id": "soul:TestSoul", "sender_name": "TestSoul"},

@@ -131,6 +131,10 @@ Hermes:
   turn.
 - Private/free-turn replies route to the operator self-DM. Public replies route
   to the origin chat. Outbound claims use `claimed_by="channels"`.
+- Outbound marks return the claim's exact `claimed_at`; it fences old results
+  after reclaim even when the sender name is unchanged. A mark 409 is logged
+  without remarking/resending and does not stop the rest of the batch. Deploy
+  the matching server and Channels request contract together; no queue migration.
 - Session rotation metadata matters because server readers chain through
   `parent_session_id`. A crash between `sessions.json` and DB session row write
   is a metadata hole, not message loss, but avoid worsening that window.

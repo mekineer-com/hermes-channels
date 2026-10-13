@@ -278,6 +278,7 @@ class MemuHttpClient:
         soul_id: str,
         outbound_id: str,
         status: str,
+        claimed_at: str,
         provider_message_id: str | None = None,
         error: str | None = None,
     ) -> dict[str, Any]:
@@ -286,6 +287,7 @@ class MemuHttpClient:
             "soul_id": str(soul_id or "").strip(),
             "outbound_id": str(outbound_id or "").strip(),
             "status": str(status or "").strip(),
+            "claimed_at": claimed_at,
         }
         if provider_message_id:
             payload["provider_message_id"] = str(provider_message_id)
