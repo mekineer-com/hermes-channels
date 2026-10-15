@@ -287,8 +287,7 @@ function trackRequest(handler) {
 
 function onSocket(event, handler) {
   sock.ev.on(event, (...args) => {
-    if (stopping && event !== 'creds.update') return;
-    const work = Promise.resolve(handler(...args));
+    const work = (async () => handler(...args))();
     socketWork.add(work);
     work.then(() => socketWork.delete(work), (error) => {
       socketWork.delete(work);

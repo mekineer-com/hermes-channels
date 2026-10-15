@@ -1,9 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { runInNewContext } from 'node:vm';
+import { DurableQueue } from './durable_queue.js';
+import { createMessageIngest } from './message_ingest.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const bridgeSource = readFileSync(join(here, 'bridge.js'), 'utf8');
@@ -125,7 +128,7 @@ test('selected Soul alone defines the prefix; pair-only cannot send without one'
   assert.throws(() => runInNewContext(declaration, {...context, PAIR_ONLY: false}), /selected Soul/);
 });
 
-test('bridge EOF waits for admitted socket writes and HTTP requests before socket teardown', async () => {
+test('bridge EOF preserves inbound messages during Stop and socket teardown', async t => {
   const { EventEmitter } = await import('node:events');
   const process = new EventEmitter();
   process.stdin = new EventEmitter();
@@ -133,7 +136,17 @@ test('bridge EOF waits for admitted socket writes and HTTP requests before socke
   process.stdin.pause = () => {};
   process.env = { CHANNELS_MANAGED_STDIN: '1' };
   const events = new EventEmitter();
+  const queueDir = mkdtempSync(join(tmpdir(), 'channels-stop-'));
+  t.after(() => rmSync(queueDir, { recursive: true, force: true }));
+  const queue = new DurableQueue({ queueDir });
+  const payload = (id, type) => ({ type, messages: [{
+    key: { remoteJid: '111@s.whatsapp.net', id, fromMe: true },
+    message: { conversation: id }, messageTimestamp: 1002,
+  }] });
   let releaseWrite, releaseHttp, releaseRequest, releaseCreds;
+  let releaseIncoming, releaseClosing;
+  const pendingIncoming = new Promise(resolve => { releaseIncoming = resolve; });
+  const pendingClosing = new Promise(resolve => { releaseClosing = resolve; });
   const pendingWrite = new Promise(resolve => { releaseWrite = resolve; });
   const pendingRequest = new Promise(resolve => { releaseRequest = resolve; });
   const lateCreds = new Promise(resolve => { releaseCreds = resolve; });
@@ -141,11 +154,35 @@ test('bridge EOF waits for admitted socket writes and HTTP requests before socke
   const calls = [];
   const context = {
     process, Promise, Set, clearTimeout, logger: { error: (...args) => assert.fail(String(args)) },
-    sock: { ev: events, end: async () => { calls.push('socket-end'); } },
+    sock: {
+      user: { id: '111:1@s.whatsapp.net', name: 'Fixture Human' },
+      ev: events,
+      end: async () => {
+        calls.push('socket-end');
+        events.emit('messages.upsert', payload('during-end', 'append'));
+      },
+    },
     socketLifecycle: { stop: async () => { calls.push('reconnect-stop'); } },
   };
   runInNewContext(bridgeSource.slice(bridgeSource.indexOf('let server;'), bridgeSource.indexOf('async function startSocket()')) +
     '\nglobalThis.control = { shutdown, onSocket, trackRequest, setServer: value => { server = value; } };', context);
+  const ingest = createMessageIngest({
+    durableQueue: queue,
+    identity: { learnAliasFromDm() {} },
+    knownState: {
+      extractPossibleSenderName: () => '', getChat: () => null, getPushName: () => '',
+      rememberChat() {}, rememberPushName() {}, resolveDmDisplayName: () => 'Fixture chat',
+    },
+    presence: { rememberInboundLastMessage() {} },
+    sentStore: { isEcho: () => false },
+    normalizeId: value => String(value || '').replace(/:.*@/, '@'),
+    getSock: () => context.sock, resolveGroupChatName: async () => '', logger: {},
+    config: { allowedUsers: new Set(), bridgeStartedAtSeconds: 1000, startupReplayGraceSeconds: 120, whatsappMode: 'self-chat' },
+  });
+  context.control.onSocket('messages.upsert', async incoming => {
+    await (incoming.messages[0].key.id === 'during-stop' ? pendingIncoming : pendingClosing);
+    await ingest.handleUpsert(incoming);
+  });
   context.control.setServer({ close: callback => { releaseHttp = callback; } });
   context.control.onSocket('creds.update', () => currentWrite);
   context.control.trackRequest(() => pendingRequest)({}, {}, assert.fail);
@@ -153,9 +190,7 @@ test('bridge EOF waits for admitted socket writes and HTTP requests before socke
   process.stdin.emit('end');
   const stopping = context.control.shutdown();
   assert.equal(context.control.shutdown(), stopping);
-  let late = false;
-  context.control.onSocket('late', () => { late = true; });
-  events.emit('late');
+  events.emit('messages.upsert', payload('during-stop', 'notify'));
   releaseHttp();
   await Promise.resolve();
   assert.deepEqual(calls, ['reconnect-stop']);
@@ -168,9 +203,56 @@ test('bridge EOF waits for admitted socket writes and HTTP requests before socke
   await Promise.resolve();
   assert.deepEqual(calls, ['reconnect-stop']);
   releaseCreds();
-  await stopping;
+  await new Promise(setImmediate);
+  assert.deepEqual(calls, ['reconnect-stop']);
+  assert.equal(queue.readUnacked(10).length, 0);
+  releaseIncoming();
+  let stopped = false;
+  stopping.then(() => { stopped = true; });
+  await new Promise(setImmediate);
   assert.deepEqual(calls, ['reconnect-stop', 'socket-end']);
-  assert.equal(late, false);
+  assert.equal(stopped, false);
+  assert.deepEqual(queue.readUnacked(10).map(row => row.messageId), ['during-stop']);
+  releaseClosing();
+  await stopping;
+  const reopened = new DurableQueue({ queueDir });
+  assert.deepEqual(reopened.readUnacked(10).map(row => [row.messageId, row.body, row.deliveryMode]), [
+    ['during-stop', 'during-stop', 'live'], ['during-end', 'during-end', 'persist_only'],
+  ]);
+});
+
+test('bridge records synchronous socket handler failures during Stop', async () => {
+  const { EventEmitter } = await import('node:events');
+  const process = new EventEmitter();
+  process.env = {};
+  process.stdin = { pause() {} };
+  const events = new EventEmitter();
+  const errors = [];
+  const context = {
+    process, Promise, Set, clearTimeout, logger: { error: (...args) => errors.push(args) },
+    sock: { ev: events, end: async () => {} }, socketLifecycle: { stop: async () => {} },
+  };
+  runInNewContext(bridgeSource.slice(bridgeSource.indexOf('let server;'), bridgeSource.indexOf('async function startSocket()')) +
+    '\nglobalThis.control = { shutdown, onSocket };', context);
+  const failure = new Error('Fixture ingest failure');
+  context.control.onSocket('messages.update', () => { throw failure; });
+  const stopping = context.control.shutdown();
+  assert.doesNotThrow(() => events.emit('messages.update', []));
+  await stopping;
+  assert.equal(errors.length, 1);
+  assert.equal(errors[0][0].err, failure);
+  assert.equal(errors[0][1], 'socket handler failed');
+  assert.equal(process.exitCode, 1);
+});
+
+test('bridge ignores connection lifecycle actions during Stop', () => {
+  let handler;
+  runInNewContext(bridgeSource.slice(bridgeSource.indexOf("  onSocket('connection.update',"), bridgeSource.indexOf("  onSocket('messages.upsert',")), {
+    stopping: true, onSocket: (_event, callback) => { handler = callback; },
+  });
+  for (const update of [{ connection: 'open' }, { connection: 'close' }, { qr: 'fixture-qr' }]) {
+    assert.doesNotThrow(() => handler(update));
+  }
 });
 
 test('bridge does not create a socket when stop arrives during auth/version startup', async () => {
