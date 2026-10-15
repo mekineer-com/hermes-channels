@@ -30,7 +30,7 @@ def _read_memu_config() -> dict:
         return {}
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+    except (OSError, ValueError) as exc:
         logger.warning("memu_policy: failed to read %s: %s", path, exc)
         return {}
     return data if isinstance(data, dict) else {}
@@ -64,7 +64,7 @@ def whatsapp_channel_settings(chat_id: str) -> tuple[WhatsAppChannelPolicy, bool
     channels = whatsapp.get("channels", {})
     raw_default = str(whatsapp.get("default_policy") or "").strip().lower()
     default_policy: WhatsAppChannelPolicy = (
-        raw_default if raw_default in {"full", "listen_only", "excluded"} else "full"
+        raw_default if raw_default in {"full", "listen_only", "excluded"} else "excluded"
     )  # type: ignore[assignment]
     entries = _read_whatsapp_channel_entries(chat_id, channels)
     policy: WhatsAppChannelPolicy = "full"

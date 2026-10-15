@@ -69,6 +69,8 @@ class FakeMemu:
 
 def make_daemon(tmp_path, monkeypatch, memu=None):
     monkeypatch.setenv("CHANNELS_HOME", str(tmp_path))
+    if not (tmp_path / "memu.json").exists():
+        (tmp_path / "memu.json").write_text(json.dumps({"whatsapp": {"default_policy": "full"}}))
     daemon = ChannelsDaemon(settings(), memu_client=memu or FakeMemu())
     daemon.send_typing = async_noop
     return daemon
@@ -1103,7 +1105,8 @@ def test_handle_turn_should_respond_false_returns_empty(tmp_path, monkeypatch):
     asyncio.run(run())
 
 
-def test_handle_turn_policy_excluded_short_circuits_before_memu_call(tmp_path, monkeypatch):
+@pytest.mark.parametrize("policy_file", ["explicit", "missing", "damaged"])
+def test_handle_turn_policy_excluded_short_circuits_before_memu_call(tmp_path, monkeypatch, policy_file):
     async def run():
         (tmp_path / "memu.json").write_text(
             json.dumps({"whatsapp": {"channels": {"123@lid": {"policy": "excluded"}}}}),
@@ -1111,6 +1114,10 @@ def test_handle_turn_policy_excluded_short_circuits_before_memu_call(tmp_path, m
         )
         memu = FakeMemu()
         daemon = make_daemon(tmp_path, monkeypatch, memu)
+        if policy_file == "missing":
+            (tmp_path / "memu.json").unlink()
+        elif policy_file == "damaged":
+            (tmp_path / "memu.json").write_text("{")
         response = await daemon._handle_turn(event(), "agent:main:whatsapp:dm:123@lid")
         assert response == ""
         assert memu.turn_calls == []

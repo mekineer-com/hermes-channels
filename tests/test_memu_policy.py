@@ -134,9 +134,11 @@ def test_explicit_chat_policy_overrides_configured_default(hermes_home):
     assert whatsapp_channel_settings("existing@s.whatsapp.net") == ("full", True)
 
 
-def test_whatsapp_channel_settings_keeps_legacy_full_default(hermes_home):
+@pytest.mark.parametrize("raw", [None, b'{"whatsapp":{"channels":{}}}', b'{', b'[]', b'\xff'])
+def test_whatsapp_channel_settings_excludes_missing_or_damaged_policy(hermes_home, raw):
     from gateway.memu_policy import whatsapp_channel_settings
 
-    _write_memu_json(hermes_home, {"whatsapp": {"channels": {}}})
+    if raw is not None:
+        (hermes_home / "memu.json").write_bytes(raw)
 
-    assert whatsapp_channel_settings("existing@s.whatsapp.net") == ("full", True)
+    assert whatsapp_channel_settings("fictional@s.whatsapp.net") == ("excluded", False)
