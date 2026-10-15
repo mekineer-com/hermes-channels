@@ -91,3 +91,24 @@ test('MemoryDiagnostics writes Chromium and page fields without raw cpu_ticks', 
     wa_collection_counts: { msg: 1, chat: 1, contact: 1 },
   });
 });
+
+test('stop awaits active diagnostics before browser teardown', async t => {
+  let tick, release;
+  const collected = new Promise(resolve => { release = resolve; });
+  t.mock.method(globalThis, 'setInterval', fn => { tick = fn; return { unref() {} }; });
+  t.mock.method(globalThis, 'clearInterval', () => {});
+  const writes = [];
+  const diagnostics = new MemoryDiagnostics({
+    intervalSeconds: 1, isReady: () => true, rootPid: () => 42, page: () => ({}),
+    dbWriteable: () => true, status: { write: row => writes.push(row) },
+    collectChromium: () => ({ processes: [] }), collectPage: () => collected,
+  });
+  diagnostics.schedule();
+  const collection = diagnostics.collectTask;
+  tick();
+  assert.equal(diagnostics.stop(), collection);
+  assert.equal(diagnostics.timer, null);
+  release({});
+  await collection;
+  assert.equal(writes.length, 1);
+});

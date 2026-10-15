@@ -14,6 +14,7 @@ import re
 import shutil
 import signal
 import subprocess
+import sys
 import threading
 import time
 import urllib.error
@@ -401,14 +402,15 @@ class ChannelsDaemon:
         ok = await self.connect()
         if not ok:
             raise RuntimeError("failed to start WhatsApp bridge")
-        self._drain_task = asyncio.create_task(self._outbound_watcher())
+        if not self._stop_requested.is_set():
+            self._drain_task = asyncio.create_task(self._outbound_watcher())
 
     def request_stop(self) -> None:
         self._stop_requested.set()
 
     async def run_forever(self) -> None:
-        await self.start()
         try:
+            await self.start()
             await self._stop_requested.wait()
         finally:
             await self.disconnect()
@@ -423,6 +425,8 @@ class ChannelsDaemon:
         return "self-chat"
 
     async def connect(self) -> bool:
+        if self._stop_requested.is_set():
+            return True
         if not shutil.which("node"):
             logger.warning("[whatsapp] Node.js not found. WhatsApp requires Node.js.")
             return False
@@ -469,6 +473,8 @@ class ChannelsDaemon:
                     pass
 
         health = await self._bridge_health()
+        if self._stop_requested.is_set():
+            return True
         if health.get("status") == "connected":
             running_hash = health.get("scriptHash", "")
             disk_hash = _file_content_hash(bridge_path)
@@ -477,13 +483,16 @@ class ChannelsDaemon:
                 self._running = True
                 self._start_web_source()
                 await self._replay_gateway_wal()
-                self._poll_task = asyncio.create_task(self._poll_messages())
+                if not self._stop_requested.is_set():
+                    self._poll_task = asyncio.create_task(self._poll_messages())
                 return True
             logger.info("[whatsapp] Running bridge is stale, restarting")
 
         _kill_stale_bridge_by_pidfile(self._session_path, bridge_path)
         _kill_port_process(self._bridge_port)
         await asyncio.sleep(1)
+        if self._stop_requested.is_set():
+            return True
 
         bridge_log = self.whatsapp_home / "bridge.log"
         self._bridge_log_fh = open(bridge_log, "a", encoding="utf-8")
@@ -491,12 +500,16 @@ class ChannelsDaemon:
         env["CHANNELS_IMAGE_CACHE_DIR"] = str(self.whatsapp_home / "image_cache")
         env["CHANNELS_AUDIO_CACHE_DIR"] = str(self.whatsapp_home / "audio_cache")
         env["CHANNELS_DOCUMENT_CACHE_DIR"] = str(self.whatsapp_home / "document_cache")
+        if _IS_WINDOWS:
+            env["CHANNELS_MANAGED_STDIN"] = "1"
         self._bridge_process = subprocess.Popen(
             ["node", str(bridge_path), "--port", str(self._bridge_port), "--session", str(self._session_path),
              "--mode", self._whatsapp_mode(), "--soul-id", self.settings.soul_id],
             stdout=self._bridge_log_fh,
             stderr=self._bridge_log_fh,
             preexec_fn=None if _IS_WINDOWS else os.setsid,
+            stdin=subprocess.PIPE if _IS_WINDOWS else None,
+            creationflags=subprocess.DETACHED_PROCESS if _IS_WINDOWS else 0,
             env=env,
         )
         _write_bridge_pidfile(self._session_path, self._bridge_process.pid)
@@ -505,9 +518,13 @@ class ChannelsDaemon:
         data: dict[str, Any] = {}
         for _ in range(15):
             await asyncio.sleep(1)
+            if self._stop_requested.is_set():
+                return True
             if self._bridge_process.poll() is not None:
                 return await self._recover_logged_out_session(had_creds)
             data = await self._bridge_health()
+            if self._stop_requested.is_set():
+                return True
             if data:
                 http_ready = True
                 if data.get("status") == "connected":
@@ -531,16 +548,21 @@ class ChannelsDaemon:
         if data.get("status") != "connected":
             for _ in range(15):
                 await asyncio.sleep(1)
+                if self._stop_requested.is_set():
+                    return True
                 if self._bridge_process.poll() is not None:
                     return await self._recover_logged_out_session(had_creds)
                 data = await self._bridge_health()
+                if self._stop_requested.is_set():
+                    return True
                 if data.get("status") == "connected":
                     break
 
         self._running = True
         self._start_web_source()
         await self._replay_gateway_wal()
-        self._poll_task = asyncio.create_task(self._poll_messages())
+        if not self._stop_requested.is_set():
+            self._poll_task = asyncio.create_task(self._poll_messages())
         return True
 
     async def _recover_logged_out_session(self, had_creds: bool) -> bool:
@@ -558,6 +580,8 @@ class ChannelsDaemon:
         return await self.connect()
 
     async def _recover_bridge_once(self, returncode: int | None) -> None:
+        if self._stop_requested.is_set():
+            return
         try:
             if returncode == _WHATSAPP_LOGGED_OUT_EXIT_CODE:
                 had_creds = (self._session_path / "creds.json").exists()
@@ -573,30 +597,25 @@ class ChannelsDaemon:
             self.request_stop()
 
     async def disconnect(self) -> None:
+        self.request_stop()
         self._running = False
-        self._stop_web_source()
-        # Pending text batches are independent tasks; include them with the main
-        # daemon tasks or shutdown can leave delayed WhatsApp turns alive.
-        tasks = [self._poll_task, self._drain_task, *list(self._background_tasks), *self._pending_text_batch_tasks.values()]
-        for task in tasks:
-            if task and not task.done():
-                task.cancel()
         await asyncio.gather(
-            *(task for task in tasks if task),
+            *(task for task in (self._poll_task, self._drain_task) if task),
             return_exceptions=True,
         )
+        # A completing turn or text batch can admit an already-queued follow-up.
+        while self._background_tasks or self._pending_text_batch_tasks:
+            await asyncio.gather(
+                *self._background_tasks, *self._pending_text_batch_tasks.values(),
+                return_exceptions=True,
+            )
+            # gather() on completed tasks need not yield to queued discard callbacks.
+            await asyncio.sleep(0)
+        await self._stop_web_source()
         if self._bridge_process:
-            try:
-                _terminate_bridge_process(self._bridge_process, force=False)
-                await asyncio.sleep(1)
-                if self._bridge_process.poll() is None:
-                    _terminate_bridge_process(self._bridge_process, force=True)
-            except Exception:
-                pass
-        try:
+            await self._stop_owned_process(self._bridge_process)
+            self._bridge_process = None
             (self._session_path / "bridge.pid").unlink(missing_ok=True)
-        except OSError:
-            pass
         self._close_bridge_log()
         self._close_web_source_log()
         self._release_session_lock()
@@ -605,7 +624,7 @@ class ChannelsDaemon:
     async def _poll_messages(self) -> None:
         wal = self._gateway_wal
         while self._running:
-            self._check_web_source_exit()
+            await self._check_web_source_exit()
             if self._bridge_process:
                 returncode = self._bridge_process.poll()
                 if returncode is not None:
@@ -1219,6 +1238,9 @@ class ChannelsDaemon:
         send_typing_timeout = max(0.25, min(1.5, interval - 0.25))
         try:
             while True:
+                # wait_for can complete concurrently with cancellation of typing.
+                if asyncio.current_task().cancelling():
+                    return
                 if stop_event is not None and stop_event.is_set():
                     return
                 try:
@@ -1924,6 +1946,8 @@ class ChannelsDaemon:
         return data if isinstance(data, dict) else {}
 
     def _start_web_source(self) -> bool:
+        if self._stop_requested.is_set():
+            return True
         if not self.settings.web_source_enabled:
             return True
         process = self._web_source_process
@@ -1952,14 +1976,19 @@ class ChannelsDaemon:
         except OSError:
             pass
         env = os.environ.copy()
+        env["CHANNELS_STORE_PYTHON"] = sys.executable
         if self.settings.web_source_chromium_path:
             env["PUPPETEER_EXECUTABLE_PATH"] = self.settings.web_source_chromium_path
+        if _IS_WINDOWS:
+            env["CHANNELS_MANAGED_STDIN"] = "1"
         self._web_source_process = subprocess.Popen(
             self._web_source_command(),
             cwd=str(web_source_dir),
             stdout=self._web_source_log_fh,
             stderr=self._web_source_log_fh,
             preexec_fn=None if _IS_WINDOWS else os.setsid,
+            stdin=subprocess.PIPE if _IS_WINDOWS else None,
+            creationflags=subprocess.DETACHED_PROCESS if _IS_WINDOWS else 0,
             env=env,
         )
         try:
@@ -1968,8 +1997,8 @@ class ChannelsDaemon:
             pass
         return True
 
-    def _check_web_source_exit(self) -> None:
-        if not self.settings.web_source_enabled or not self._web_source_process:
+    async def _check_web_source_exit(self) -> None:
+        if self._stop_requested.is_set() or not self.settings.web_source_enabled or not self._web_source_process:
             return
         status = self._read_web_source_status()
         returncode = self._web_source_process.poll()
@@ -1997,7 +2026,7 @@ class ChannelsDaemon:
             and self.settings.web_source_auto_headful
         ):
             logger.info("[whatsapp] WhatsApp web-source needs pairing; opening Chromium window")
-            if self._stop_web_source():
+            if await self._stop_web_source():
                 self._web_source_pairing_headful = True
                 self._start_web_source()
         elif (
@@ -2006,34 +2035,33 @@ class ChannelsDaemon:
             and not self.settings.web_source_headful
         ):
             logger.info("[whatsapp] WhatsApp web-source paired; returning Chromium to headless mode")
-            if self._stop_web_source():
+            if await self._stop_web_source():
                 self._web_source_pairing_headful = False
                 self._start_web_source()
 
-    def _stop_web_source(self) -> bool:
-        proc = self._web_source_process
-        stopped = True
-        if proc and proc.poll() is None:
+    async def _stop_owned_process(self, proc) -> None:
+        if proc.poll() is None:
             try:
-                _terminate_bridge_process(proc, force=False)
-                if proc.poll() is None:
-                    proc.wait(timeout=2)
-            except Exception:
-                try:
-                    _terminate_bridge_process(proc, force=True)
-                    if proc.poll() is None:
-                        proc.wait(timeout=2)
-                except Exception:
-                    pass
-            stopped = proc.poll() is not None
-        if stopped:
+                if _IS_WINDOWS:
+                    proc.stdin.close()
+                else:
+                    # Do not broadcast SIGTERM to the web-source's SQLite writer.
+                    proc.send_signal(signal.SIGTERM)
+            except (ProcessLookupError, BrokenPipeError):
+                pass  # The child exited between poll() and the stop request.
+        await asyncio.to_thread(proc.wait)
+
+    async def _stop_web_source(self) -> bool:
+        proc = self._web_source_process
+        if proc:
+            await self._stop_owned_process(proc)
             self._web_source_process = None
             try:
                 self._web_source_pid_path.unlink(missing_ok=True)
             except OSError:
                 pass
             self._close_web_source_log()
-        return stopped
+        return True
 
     async def _monitor_web_source_setup(self) -> None:
         while self._running:
@@ -2041,7 +2069,7 @@ class ChannelsDaemon:
                 logger.info("[whatsapp] WhatsApp pairing detected; starting reply bridge")
                 if await self.connect():
                     return
-            self._check_web_source_exit()
+            await self._check_web_source_exit()
             await asyncio.sleep(2)
 
     def _close_bridge_log(self) -> None:
@@ -2241,11 +2269,18 @@ async def amain() -> None:
 
     loop = asyncio.get_running_loop()
     if threading.current_thread() is threading.main_thread():
+        if _IS_WINDOWS:
+            import ctypes
+
+            # A console parent can pass its Ctrl+C-ignore flag to Python.
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            if not kernel32.SetConsoleCtrlHandler(None, False):
+                raise ctypes.WinError(ctypes.get_last_error())
         for sig in (signal.SIGINT, signal.SIGTERM):
             try:
                 loop.add_signal_handler(sig, shutdown_signal_handler, sig)  # windows-footgun: ok — wrapped in try/except NotImplementedError for Windows
             except NotImplementedError:
-                pass
+                signal.signal(sig, lambda received, _frame: loop.call_soon_threadsafe(shutdown_signal_handler, received))
     else:
         logger.info("Skipping signal handlers (not running in main thread).")
 

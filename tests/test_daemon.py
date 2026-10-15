@@ -302,8 +302,11 @@ def test_duplicate_source_db_error_dispatches_normally_without_marking_wal(tmp_p
     asyncio.run(run())
 
 
-def test_connect_without_creds_starts_bridge_http_but_not_polling(tmp_path, monkeypatch):
+@pytest.mark.parametrize('windows', [False, True])
+def test_connect_without_creds_starts_bridge_http_but_not_polling(tmp_path, monkeypatch, windows):
     async def run():
+        monkeypatch.setattr(daemon_module, '_IS_WINDOWS', windows)
+        monkeypatch.setattr(daemon_module.subprocess, 'DETACHED_PROCESS', 0x00000008, raising=False)
         real_sleep = asyncio.sleep
         settings_obj = settings()
         settings_obj.web_source_enabled = True
@@ -321,6 +324,19 @@ def test_connect_without_creds_starts_bridge_http_but_not_polling(tmp_path, monk
 
             def poll(self):
                 return None
+
+            def send_signal(self, sig):
+                assert sig == daemon_module.signal.SIGTERM
+
+            def wait(self):
+                return 0
+
+            @property
+            def stdin(self):
+                return self
+
+            def close(self):
+                pass
 
         class FakeCompleted:
             returncode = 0
@@ -369,6 +385,12 @@ def test_connect_without_creds_starts_bridge_http_but_not_polling(tmp_path, monk
         await real_sleep(0)
 
         assert popen_calls
+        kwargs = popen_calls[0][1]
+        assert kwargs['creationflags'] == (0x00000008 if windows else 0)
+        assert kwargs['stdin'] == (daemon_module.subprocess.PIPE if windows else None)
+        assert kwargs['preexec_fn'] == (None if windows else daemon_module.os.setsid)
+        if windows:
+            assert kwargs['env']['CHANNELS_MANAGED_STDIN'] == '1'
         assert web_source_calls == [False]
         assert monitor_calls == [True]
         assert replay_calls == []
@@ -552,7 +574,7 @@ def test_logged_out_web_source_archives_auth_and_restarts(tmp_path, monkeypatch)
     restarted = []
     daemon._start_web_source = lambda: restarted.append(True) or True
 
-    daemon._check_web_source_exit()
+    asyncio.run(daemon._check_web_source_exit())
 
     backups = list((tmp_path / "backups").glob("wwebjs-auth-logged-out-*"))
     assert len(backups) == 1
@@ -1725,4 +1747,302 @@ def test_second_event_during_active_turn_queues_without_second_task(tmp_path, mo
         assert sent[-1] == ("123@lid", "pong")
         await daemon.disconnect()
 
+    asyncio.run(run())
+
+
+def test_disconnect_drains_batches_turns_followups_and_claimed_outbounds(tmp_path, monkeypatch):
+    async def run():
+        daemon = make_daemon(tmp_path, monkeypatch)
+        turn_started, release_turn, release_outbound = asyncio.Event(), asyncio.Event(), asyncio.Event()
+        completed = []
+
+        async def turn(ev, _key):
+            if ev.message_id == 'first':
+                turn_started.set()
+                await release_turn.wait()
+            completed.append(ev.message_id)
+            return ''
+
+        async def outbound():
+            await release_outbound.wait()
+            completed.append('outbound-marked')
+
+        daemon._handle_turn = turn
+        daemon._gateway_wal.mark_processed = lambda _seq: None
+        await daemon.handle_message(event('first', 'first'))
+        await turn_started.wait()
+        daemon._enqueue_text_event(event('queued', 'queued'))
+        daemon._drain_task = asyncio.create_task(outbound())
+        stopping = asyncio.create_task(daemon.disconnect())
+        await wait_until(lambda: bool(daemon._pending_messages))
+        daemon.request_stop()
+        assert not stopping.done()
+        assert daemon._db._conn.execute('SELECT 1').fetchone()[0] == 1
+        release_outbound.set()
+        release_turn.set()
+        await asyncio.wait_for(stopping, 1)
+        assert sorted(completed) == ['first', 'outbound-marked', 'queued']
+        assert not daemon._background_tasks
+        assert not daemon._pending_text_batch_tasks
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('windows', [False, True])
+def test_disconnect_retains_ownership_until_owned_children_exit(tmp_path, monkeypatch, windows):
+    async def run():
+        daemon = make_daemon(tmp_path, monkeypatch)
+        monkeypatch.setattr(daemon_module, '_IS_WINDOWS', windows)
+        monkeypatch.setattr(daemon_module, '_terminate_bridge_process', lambda *_a, **_k: pytest.fail('forced stop'))
+        released, waiting = threading.Event(), threading.Event()
+        signals = []
+
+        class Child:
+            def __init__(self):
+                self.stdin = self
+            def poll(self):
+                return 0 if released.is_set() else None
+            def close(self):
+                signals.append('EOF')
+            def send_signal(self, sig):
+                signals.append(sig)
+            def wait(self):
+                waiting.set()
+                assert released.wait(2), 'test did not release fake child'
+                return 0
+
+        daemon._bridge_process = Child()
+        daemon._web_source_process = Child()
+        daemon._session_path.mkdir(parents=True)
+        pidfile = daemon._session_path / 'bridge.pid'
+        pidfile.write_text('fictional-owned-pid')
+        daemon._web_source_pid_path.write_text('fictional-owned-pid')
+        cleanup = []
+        daemon._release_session_lock = lambda: cleanup.append('unlock')
+        stopping = asyncio.create_task(daemon.disconnect())
+        try:
+            await wait_until(waiting.is_set)
+            daemon.request_stop()
+            assert not stopping.done()
+            assert pidfile.exists() and daemon._web_source_pid_path.exists()
+            assert cleanup == []
+        finally:
+            released.set()
+            await asyncio.wait_for(stopping, 1)
+        assert signals == (['EOF'] if windows else [daemon_module.signal.SIGTERM])
+        assert cleanup == ['unlock']
+        assert not pidfile.exists() and not daemon._web_source_pid_path.exists()
+
+    asyncio.run(run())
+
+
+def test_disconnect_leaves_adopted_bridge_pidfile(tmp_path, monkeypatch):
+    daemon = make_daemon(tmp_path, monkeypatch)
+    daemon._session_path.mkdir(parents=True)
+    pidfile = daemon._session_path / 'bridge.pid'
+    pidfile.write_text('fictional-external-owner')
+    asyncio.run(daemon.disconnect())
+    assert pidfile.read_text() == 'fictional-external-owner'
+
+
+def test_stop_during_startup_cleans_owned_resources_without_watcher(tmp_path, monkeypatch):
+    async def run():
+        daemon = make_daemon(tmp_path, monkeypatch)
+        cleaned = []
+        async def connect():
+            daemon.request_stop()
+            return True
+        daemon.connect = connect
+        daemon._release_session_lock = lambda: cleaned.append('unlock')
+        await daemon.run_forever()
+        assert daemon._drain_task is None
+        assert cleaned == ['unlock']
+    asyncio.run(run())
+
+
+def test_windows_signal_fallback_clears_inherited_ignore_and_only_requests_stop(tmp_path, monkeypatch):
+    import ctypes
+    from types import SimpleNamespace
+
+    async def run():
+        daemon = make_daemon(tmp_path, monkeypatch)
+        monkeypatch.setattr(daemon_module, 'ChannelsDaemon', lambda: daemon)
+        monkeypatch.setattr(daemon_module, '_IS_WINDOWS', True)
+        registered, cleared = {}, []
+        kernel = SimpleNamespace(SetConsoleCtrlHandler=lambda handler, ignore: cleared.append((handler, ignore)) or 1)
+        monkeypatch.setattr(ctypes, 'WinDLL', lambda *_a, **_kw: kernel, raising=False)
+        def unsupported(*_args):
+            raise NotImplementedError
+        monkeypatch.setattr(asyncio.get_running_loop(), 'add_signal_handler', unsupported)
+        monkeypatch.setattr(daemon_module.signal, 'signal', lambda sig, handler: registered.setdefault(sig, handler))
+        async def run_forever():
+            assert cleared == [(None, False)]
+            registered[daemon_module.signal.SIGINT](daemon_module.signal.SIGINT, None)
+            registered[daemon_module.signal.SIGINT](daemon_module.signal.SIGINT, None)
+            await asyncio.sleep(0)
+            assert daemon._stop_requested.is_set()
+        daemon.run_forever = run_forever
+        try:
+            await daemon_module.amain()
+        finally:
+            daemon._db.close()
+    asyncio.run(run())
+
+
+def test_typing_exits_when_wait_for_races_with_cancellation(tmp_path, monkeypatch):
+    async def run():
+        daemon = make_daemon(tmp_path, monkeypatch)
+        started = asyncio.Event()
+        async def raced_wait_for(work, **_kwargs):
+            await work
+            started.set()
+            try:
+                await asyncio.sleep(100)
+            except asyncio.CancelledError:
+                return None  # The inner operation won the cancellation race.
+        monkeypatch.setattr(daemon_module.asyncio, 'wait_for', raced_wait_for)
+        typing = asyncio.create_task(daemon._keep_typing('fictional@lid', interval=0))
+        await started.wait()
+        typing.cancel()
+        await typing
+        await daemon.disconnect()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('windows', [False, True])
+def test_web_source_spawn_isolated_and_stopped_cooperatively(tmp_path, monkeypatch, windows):
+    async def run():
+        daemon = make_daemon(tmp_path, monkeypatch)
+        daemon.settings.web_source_enabled = True
+        daemon._web_source_script = tmp_path / 'source' / 'source-daemon.js'
+        daemon._web_source_script.parent.mkdir()
+        daemon._web_source_script.write_text('// disposable fixture')
+        (daemon._web_source_script.parent / 'node_modules').mkdir()
+        monkeypatch.setattr(daemon_module, '_IS_WINDOWS', windows)
+        monkeypatch.setattr(daemon_module.subprocess, 'DETACHED_PROCESS', 0x00000008, raising=False)
+        monkeypatch.setattr(daemon_module, '_kill_stale_web_source_by_pidfile', lambda *_a, **_kw: None)
+        spawned, stopped = [], []
+        class Child:
+            pid = 1234
+            @property
+            def stdin(self):
+                return self
+            def close(self):
+                stopped.append('EOF')
+            def poll(self):
+                return None
+            def send_signal(self, sig):
+                stopped.append(sig)
+            def wait(self):
+                return 0
+        def popen(*args, **kwargs):
+            spawned.append(kwargs)
+            return Child()
+        monkeypatch.setattr(daemon_module.subprocess, 'Popen', popen)
+        assert daemon._start_web_source()
+        assert spawned[0]['stdin'] == (daemon_module.subprocess.PIPE if windows else None)
+        assert spawned[0]['creationflags'] == (0x00000008 if windows else 0)
+        assert spawned[0]['env']['CHANNELS_STORE_PYTHON'] == daemon_module.sys.executable
+        assert spawned[0]['preexec_fn'] == (None if windows else daemon_module.os.setsid)
+        if windows:
+            assert spawned[0]['env']['CHANNELS_MANAGED_STDIN'] == '1'
+        await daemon.disconnect()
+        assert stopped == (['EOF'] if windows else [daemon_module.signal.SIGTERM])
+    asyncio.run(run())
+
+
+def test_failed_start_still_runs_disconnect(tmp_path, monkeypatch):
+    async def run():
+        daemon = make_daemon(tmp_path, monkeypatch)
+        cleaned = []
+        daemon._release_session_lock = lambda: cleaned.append('unlock')
+        async def failed_connect():
+            raise RuntimeError('fictional failed start')
+        daemon.connect = failed_connect
+        with pytest.raises(RuntimeError, match='fictional failed start'):
+            await daemon.run_forever()
+        assert cleaned == ['unlock']
+    asyncio.run(run())
+
+
+def test_disconnect_yields_to_completed_task_discard_callback(tmp_path, monkeypatch):
+    async def run():
+        daemon = make_daemon(tmp_path, monkeypatch)
+        task = asyncio.create_task(async_noop())
+        daemon._background_tasks.add(task)
+        task.add_done_callback(daemon._background_tasks.discard)
+        await asyncio.sleep(0)
+        # The task is done, but its queued discard callback has not run yet.
+        assert task.done() and task in daemon._background_tasks
+        await daemon.disconnect()
+        assert not daemon._background_tasks
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('readiness_loop', ['http', 'connected'])
+def test_stop_during_bridge_readiness_does_not_resume_recovery(tmp_path, monkeypatch, readiness_loop):
+    async def run():
+        daemon = make_daemon(tmp_path, monkeypatch)
+        daemon._session_path.mkdir(parents=True)
+        (daemon._session_path / 'creds.json').write_text('{}')
+        daemon._bridge_script = tmp_path / 'bridge' / 'bridge.js'
+        daemon._bridge_script.parent.mkdir()
+        daemon._bridge_script.write_text('// disposable fixture')
+        deps = daemon._bridge_script.parent / 'node_modules'
+        deps.mkdir()
+        (deps / '.channels-pkg-hash').write_text('fixture-hash')
+        monkeypatch.setattr(daemon_module.shutil, 'which', lambda _name: '/fake/node')
+        monkeypatch.setattr(daemon_module, '_file_content_hash', lambda _path: 'fixture-hash')
+        monkeypatch.setattr(daemon_module, '_kill_stale_bridge_by_pidfile', lambda *_a: None)
+        monkeypatch.setattr(daemon_module, '_kill_port_process', lambda *_a: None)
+        daemon._acquire_session_lock = lambda: True
+        class Child:
+            pid = 1234
+            returncode = None
+            @property
+            def stdin(self):
+                return self
+            def close(self):
+                self.returncode = 0
+            def poll(self):
+                return self.returncode
+            def send_signal(self, _sig):
+                self.returncode = 0
+            def wait(self):
+                return self.returncode
+        monkeypatch.setattr(daemon_module.subprocess, 'Popen', lambda *_a, **_kw: Child())
+        real_sleep = asyncio.sleep
+        async def fast_sleep(_delay):
+            await real_sleep(0)
+        monkeypatch.setattr(daemon_module.asyncio, 'sleep', fast_sleep)
+        entered, release = asyncio.Event(), asyncio.Event()
+        calls = 0
+        suspend_at = 2 if readiness_loop == 'http' else 17
+        async def health():
+            nonlocal calls
+            calls += 1
+            if calls == suspend_at:
+                entered.set()
+                await release.wait()
+                return {'status': 'connected'}
+            return {} if calls == 1 else {'status': 'connecting'}
+        daemon._bridge_health = health
+        resumed = []
+        daemon._start_web_source = lambda: resumed.append('web-source') or True
+        async def replay():
+            resumed.append('wal-replay')
+        daemon._replay_gateway_wal = replay
+        daemon._running = True
+        recovery = asyncio.create_task(daemon._recover_bridge_once(None))
+        try:
+            await asyncio.wait_for(entered.wait(), 1)
+            daemon.request_stop()
+            await daemon.disconnect()
+            assert not daemon._running
+        finally:
+            release.set()
+            await asyncio.wait_for(recovery, 1)
+        assert not daemon._running
+        assert daemon._bridge_process is None and daemon._poll_task is None
+        assert resumed == []
     asyncio.run(run())

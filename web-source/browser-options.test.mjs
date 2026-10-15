@@ -40,6 +40,9 @@ test('buildClientOptions preserves LocalAuth, user agent, executable, and headle
   });
   assert.equal(options.userAgent, 'ua');
   assert.equal(options.puppeteer.headless, false);
+  assert.equal(options.puppeteer.handleSIGINT, false);
+  assert.equal(options.puppeteer.handleSIGTERM, false);
+  assert.equal(options.puppeteer.handleSIGHUP, false);
   assert.equal(options.puppeteer.executablePath, '/usr/bin/chromium');
   assert.ok(options.puppeteer.args.includes('--disable-features=ServiceWorker'));
 });

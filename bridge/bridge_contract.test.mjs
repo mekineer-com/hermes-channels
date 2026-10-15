@@ -53,6 +53,7 @@ test('send/edit and media identify the Soul, including text before voice', async
     WHATSAPP_MODE: 'self-chat', REPLY_PREFIX: prefix,
     MAX_MESSAGE_LENGTH: 40, CHUNK_DELAY_MS: 0,
     app: { post: (route, handler) => { routes[route] = handler; } },
+    trackRequest: handler => handler,
     sock: {}, socketLifecycle: { isConnected: () => true },
     presence: { hasUnreadMessages: () => false, postSendPresenceAndUnreadRestore: async () => {} },
     sendWithTimeout: async (_chat, payload) => {
@@ -123,3 +124,108 @@ test('selected Soul alone defines the prefix; pair-only cannot send without one'
   assert.throws(() => runInNewContext("sendWithTimeout('chat', {})", context), /Select a Soul/);
   assert.throws(() => runInNewContext(declaration, {...context, PAIR_ONLY: false}), /selected Soul/);
 });
+
+test('bridge EOF waits for admitted socket writes and HTTP requests before socket teardown', async () => {
+  const { EventEmitter } = await import('node:events');
+  const process = new EventEmitter();
+  process.stdin = new EventEmitter();
+  process.stdin.resume = () => {};
+  process.stdin.pause = () => {};
+  process.env = { CHANNELS_MANAGED_STDIN: '1' };
+  const events = new EventEmitter();
+  let releaseWrite, releaseHttp, releaseRequest, releaseCreds;
+  const pendingWrite = new Promise(resolve => { releaseWrite = resolve; });
+  const pendingRequest = new Promise(resolve => { releaseRequest = resolve; });
+  const lateCreds = new Promise(resolve => { releaseCreds = resolve; });
+  let currentWrite = pendingWrite;
+  const calls = [];
+  const context = {
+    process, Promise, Set, clearTimeout, logger: { error: (...args) => assert.fail(String(args)) },
+    sock: { ev: events, end: async () => { calls.push('socket-end'); } },
+    socketLifecycle: { stop: async () => { calls.push('reconnect-stop'); } },
+  };
+  runInNewContext(bridgeSource.slice(bridgeSource.indexOf('let server;'), bridgeSource.indexOf('async function startSocket()')) +
+    '\nglobalThis.control = { shutdown, onSocket, trackRequest, setServer: value => { server = value; } };', context);
+  context.control.setServer({ close: callback => { releaseHttp = callback; } });
+  context.control.onSocket('creds.update', () => currentWrite);
+  context.control.trackRequest(() => pendingRequest)({}, {}, assert.fail);
+  events.emit('creds.update');
+  process.stdin.emit('end');
+  const stopping = context.control.shutdown();
+  assert.equal(context.control.shutdown(), stopping);
+  let late = false;
+  context.control.onSocket('late', () => { late = true; });
+  events.emit('late');
+  releaseHttp();
+  await Promise.resolve();
+  assert.deepEqual(calls, ['reconnect-stop']);
+  releaseWrite();
+  await Promise.resolve();
+  assert.deepEqual(calls, ['reconnect-stop']);
+  currentWrite = lateCreds;
+  events.emit('creds.update');
+  releaseRequest();
+  await Promise.resolve();
+  assert.deepEqual(calls, ['reconnect-stop']);
+  releaseCreds();
+  await stopping;
+  assert.deepEqual(calls, ['reconnect-stop', 'socket-end']);
+  assert.equal(late, false);
+});
+
+test('bridge does not create a socket when stop arrives during auth/version startup', async () => {
+  let releaseVersion;
+  const version = new Promise(resolve => { releaseVersion = resolve; });
+  const lifecycle = { stopping: false, beginStart: () => 1, fetchVersion: () => version };
+  const context = {
+    socketLifecycle: lifecycle, SESSION_DIR: '/fictional',
+    identity: { setKeyStore() {} }, useMultiFileAuthState: async () => ({ state: { keys: {} } }),
+    makeWASocket: () => assert.fail('late socket creation'),
+  };
+  runInNewContext(bridgeSource.slice(bridgeSource.indexOf('async function startSocket()'), bridgeSource.indexOf('// HTTP server')) +
+    '\nglobalThis.start = startSocket;', context);
+  const starting = context.start();
+  await Promise.resolve();
+  lifecycle.stopping = true;
+  releaseVersion([1, 2, 3]);
+  await starting;
+});
+
+for (const outcome of ['resolve', 'reject']) {
+  test(`bridge drains raw send after HTTP timeout until it ${outcome}s`, async () => {
+    const { EventEmitter } = await import('node:events');
+    const process = new EventEmitter();
+    process.env = {};
+    process.stdin = { pause() {} };
+    let resolveSend, rejectSend, expire;
+    const rawSend = new Promise((resolve, reject) => { resolveSend = resolve; rejectSend = reject; });
+    const calls = [];
+    const context = {
+      process, Promise, Set, SOUL_ID: 'Beacon', SEND_TIMEOUT_MS: 60_000,
+      setTimeout: callback => { expire = callback; }, clearTimeout() {},
+      logger: { error: (...args) => assert.fail(String(args)) },
+      sock: { sendMessage: () => rawSend, end: async () => { calls.push('socket-end'); } },
+      socketLifecycle: { stop: async () => {} },
+    };
+    runInNewContext(bridgeSource.slice(bridgeSource.indexOf('let server;'), bridgeSource.indexOf('async function startSocket()')) +
+      bridgeSource.slice(bridgeSource.indexOf('function sendWithTimeout('), bridgeSource.indexOf('function formatOutgoingMessage(')) +
+      '\nglobalThis.control = { shutdown, trackRequest, sendWithTimeout };', context);
+    const request = context.control.trackRequest(async () => {
+      await assert.rejects(context.control.sendWithTimeout('fictional@lid', {}), /sendMessage timed out/);
+      calls.push('http-timeout');
+    })({}, {}, assert.fail);
+    expire();
+    await request;
+    assert.deepEqual(calls, ['http-timeout']);
+    const stopping = context.control.shutdown();
+    try {
+      await new Promise(setImmediate);
+      assert.deepEqual(calls, ['http-timeout']);
+    } finally {
+      if (outcome === 'resolve') resolveSend({ key: { id: 'fictional-sent' } });
+      else rejectSend(new Error('Fixture send failure'));
+      await stopping;
+    }
+    assert.deepEqual(calls, ['http-timeout', 'socket-end']);
+  });
+}

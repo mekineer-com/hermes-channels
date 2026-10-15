@@ -122,7 +122,11 @@ function sendWithTimeout(chatId, payload, timeoutMs = SEND_TIMEOUT_MS) {
       timeoutMs,
     );
   });
-  return Promise.race([sock.sendMessage(chatId, payload), timeoutPromise])
+  const sending = sock.sendMessage(chatId, payload);
+  socketWork.add(sending);
+  const settled = () => socketWork.delete(sending);
+  sending.then(settled, settled);
+  return Promise.race([sending, timeoutPromise])
     .finally(() => clearTimeout(timer));
 }
 
@@ -262,12 +266,76 @@ knownState.canonicalize();
 knownState.persistKnownChats();
 knownState.persistKnownContacts();
 
+let server;
+let stopping = false;
+let shutdownPromise;
+let pairingExitTimer;
+const socketWork = new Set();
+const httpWork = new Set();
+
+function trackRequest(handler) {
+  return (req, res, next) => {
+    const work = handler(req, res);
+    httpWork.add(work);
+    work.then(() => httpWork.delete(work), error => {
+      httpWork.delete(work);
+      next(error);
+    });
+    return work;
+  };
+}
+
+function onSocket(event, handler) {
+  sock.ev.on(event, (...args) => {
+    if (stopping && event !== 'creds.update') return;
+    const work = Promise.resolve(handler(...args));
+    socketWork.add(work);
+    work.then(() => socketWork.delete(work), (error) => {
+      socketWork.delete(work);
+      if (!stopping) return Promise.reject(error);
+      logger.error({ err: error }, 'socket handler failed');
+      process.exitCode = 1;
+    });
+  });
+}
+
+function shutdown() {
+  if (shutdownPromise) return shutdownPromise;
+  stopping = true;
+  clearTimeout(pairingExitTimer);
+  const httpClosed = server ? new Promise((resolve, reject) => {
+    server.close((error) => error ? reject(error) : resolve());
+  }) : Promise.resolve();
+  shutdownPromise = (async () => {
+    await socketLifecycle.stop();
+    await httpClosed;
+    await Promise.allSettled([...httpWork]);
+    while (socketWork.size) await Promise.allSettled([...socketWork]);
+    await sock?.end(undefined);
+    while (socketWork.size) await Promise.allSettled([...socketWork]);
+    process.stdin.pause();
+  })();
+  shutdownPromise.catch((error) => {
+    logger.error({ err: error }, 'bridge shutdown failed');
+    process.exitCode = 1;
+  });
+  return shutdownPromise;
+}
+
+process.on('SIGINT', shutdown);
+process.on('SIGTERM', shutdown);
+if (process.env.CHANNELS_MANAGED_STDIN === '1') {
+  process.stdin.on('end', shutdown);
+  process.stdin.resume();
+}
+
 async function startSocket() {
   const socketId = socketLifecycle.beginStart();
 
   const { state, saveCreds } = await useMultiFileAuthState(SESSION_DIR);
   identity.setKeyStore(state.keys);
   const version = await socketLifecycle.fetchVersion();
+  if (socketLifecycle.stopping) return;
 
   sock = makeWASocket({
     version,
@@ -297,36 +365,36 @@ async function startSocket() {
     },
   });
 
-  sock.ev.on('creds.update', () => {
-    saveCreds();
+  onSocket('creds.update', async () => {
+    await saveCreds();
     identity.rebuildFromDisk();
   });
-  sock.ev.on('chats.phoneNumberShare', (payload) => {
+  onSocket('chats.phoneNumberShare', (payload) => {
     identity.rememberPhoneShares(payload);
   });
-  sock.ev.on('chats.upsert', (chats) => {
+  onSocket('chats.upsert', (chats) => {
     presence.updateUnreadCountSnapshot(chats);
     knownState.rememberChatsFromSnapshot(chats);
   });
-  sock.ev.on('chats.update', async (chats) => {
+  onSocket('chats.update', async (chats) => {
     presence.updateUnreadCountSnapshot(chats);
     knownState.rememberChatsFromSnapshot(chats);
     await messageIngest.enqueueHistoryMessagesFromChats(chats, 'chats.update');
   });
-  sock.ev.on('contacts.upsert', (contacts) => {
+  onSocket('contacts.upsert', (contacts) => {
     knownState.rememberContactsFromSnapshot(contacts);
   });
-  sock.ev.on('contacts.update', (contacts) => {
+  onSocket('contacts.update', (contacts) => {
     knownState.rememberContactsFromSnapshot(contacts);
   });
-  sock.ev.on('messaging-history.set', async ({ chats, contacts, messages }) => {
+  onSocket('messaging-history.set', async ({ chats, contacts, messages }) => {
     knownState.rememberChatsFromSnapshot(chats);
     knownState.rememberContactsFromSnapshot(contacts);
     await messageIngest.enqueueHistoryMessages({ chats, messages }, 'messaging-history.set');
   });
 
-  sock.ev.on('connection.update', (update) => {
-    if (!socketLifecycle.isCurrent(socketId)) return;
+  onSocket('connection.update', (update) => {
+    if (stopping || !socketLifecycle.isCurrent(socketId)) return;
     const { connection, lastDisconnect, qr, receivedPendingNotifications } = update;
 
     if (qr) {
@@ -367,7 +435,7 @@ async function startSocket() {
       if (PAIR_ONLY) {
         console.log('✅ Pairing complete. Credentials saved.');
         // Give Baileys a moment to flush creds, then exit cleanly
-        setTimeout(() => process.exit(0), 2000);
+        pairingExitTimer = setTimeout(() => process.exit(0), 2000);
       }
     }
     if (receivedPendingNotifications && connection !== 'close') {
@@ -375,13 +443,14 @@ async function startSocket() {
     }
   });
 
-  sock.ev.on('messages.upsert', (payload) => messageIngest.handleUpsert(payload));
-  sock.ev.on('messages.update', (updates) => messageIngest.handleUpdate(updates));
+  onSocket('messages.upsert', (payload) => messageIngest.handleUpsert(payload));
+  onSocket('messages.update', (updates) => messageIngest.handleUpdate(updates));
 }
 
 // HTTP server
 const app = express();
 app.use(express.json());
+app.use((_req, res, next) => stopping ? res.status(503).end() : next());
 
 // Host-header validation — defends against DNS rebinding.
 // The bridge binds loopback-only (127.0.0.1) but a victim browser on
@@ -441,7 +510,7 @@ app.post('/ack', (req, res) => {
 });
 
 // Send a message
-app.post('/send', async (req, res) => {
+app.post('/send', trackRequest(async (req, res) => {
   if (!sock || !socketLifecycle.isConnected()) {
     return res.status(503).json({ error: 'Not connected to WhatsApp' });
   }
@@ -475,10 +544,10 @@ app.post('/send', async (req, res) => {
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
-});
+}));
 
 // Edit a previously sent message
-app.post('/edit', async (req, res) => {
+app.post('/edit', trackRequest(async (req, res) => {
   if (!sock || !socketLifecycle.isConnected()) {
     return res.status(503).json({ error: 'Not connected to WhatsApp' });
   }
@@ -513,7 +582,7 @@ app.post('/edit', async (req, res) => {
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
-});
+}));
 
 // MIME type map and media type inference for /send-media
 const MIME_MAP = {
@@ -535,7 +604,7 @@ function inferMediaType(ext) {
 }
 
 // Send media (image, video, document) natively
-app.post('/send-media', async (req, res) => {
+app.post('/send-media', trackRequest(async (req, res) => {
   if (!sock || !socketLifecycle.isConnected()) {
     return res.status(503).json({ error: 'Not connected to WhatsApp' });
   }
@@ -629,10 +698,10 @@ app.post('/send-media', async (req, res) => {
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
-});
+}));
 
 // Typing indicator
-app.post('/typing', async (req, res) => {
+app.post('/typing', trackRequest(async (req, res) => {
   if (!sock || !socketLifecycle.isConnected()) {
     return res.status(503).json({ error: 'Not connected' });
   }
@@ -649,10 +718,10 @@ app.post('/typing', async (req, res) => {
   } catch (err) {
     res.json({ success: false });
   }
-});
+}));
 
 // Chat info
-app.get('/chat/:id', async (req, res) => {
+app.get('/chat/:id', trackRequest(async (req, res) => {
   const chatId = normalizeWhatsAppId(req.params.id);
   const isGroup = chatId.endsWith('@g.us');
 
@@ -675,7 +744,7 @@ app.get('/chat/:id', async (req, res) => {
     isGroup,
     participants: [],
   });
-});
+}));
 
 // Best-effort discovery list for local policy UIs.
 // Includes chats seen in message events even when those messages are filtered
@@ -721,7 +790,7 @@ if (PAIR_ONLY) {
   console.log();
   socketLifecycle.startNow();
 } else {
-  app.listen(PORT, '127.0.0.1', () => {
+  server = app.listen(PORT, '127.0.0.1', () => {
     console.log(`🌉 WhatsApp bridge listening on port ${PORT} (mode: ${WHATSAPP_MODE})`);
     console.log(`📁 Session stored in: ${SESSION_DIR}`);
     if (ALLOWED_USERS.size > 0) {

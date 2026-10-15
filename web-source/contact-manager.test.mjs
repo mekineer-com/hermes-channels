@@ -109,3 +109,22 @@ test('pruneScopeOnce uses one active-since metadata guard and records backup pat
     last_prune_backup_path: '/tmp/web_source.db.bak-prune-stamp',
   });
 });
+
+test('stop awaits an admitted periodic snapshot without replacing its promise on a busy tick', async t => {
+  let tick, release;
+  const rows = new Promise(resolve => { release = resolve; });
+  t.mock.method(globalThis, 'setInterval', fn => { tick = fn; return { unref() {} }; });
+  t.mock.method(globalThis, 'clearInterval', () => {});
+  const { contactManager, commands } = manager({ intervalSeconds: 1, readSnapshot: () => rows });
+  contactManager.schedule();
+  tick();
+  await Promise.resolve();
+  const snapshot = contactManager.snapshotTask;
+  tick();
+  assert.equal(contactManager.stop(), snapshot);
+  assert.equal(contactManager.stop(), snapshot);
+  assert.equal(contactManager.timer, null);
+  release([{ contact_id: 'fictional@c.us' }]);
+  await snapshot;
+  assert.deepEqual(commands.map(c => c.op), ['in_scope_contact_ids', 'upsert_contact']);
+});

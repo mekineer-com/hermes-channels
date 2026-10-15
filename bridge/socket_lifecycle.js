@@ -17,6 +17,7 @@ export class SocketLifecycle {
     this.generation = 0;
     this.openGeneration = 0;
     this.reconnectTimer = null;
+    this.stopping = false;
   }
 
   beginStart() {
@@ -55,7 +56,7 @@ export class SocketLifecycle {
   }
 
   scheduleStart(delayMs) {
-    if (this.reconnectTimer) return;
+    if (this.stopping || this.reconnectTimer) return;
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
       this.startNow();
@@ -63,11 +64,19 @@ export class SocketLifecycle {
   }
 
   startNow() {
-    this.onStart().catch((err) => {
+    if (this.stopping) return;
+    this.starting = this.onStart().catch((err) => {
       this.state = 'disconnected';
       this.logger.error(`❌ WhatsApp socket start failed: ${err?.message || err}`);
       this.scheduleStart(3000);
     });
+  }
+
+  stop() {
+    this.stopping = true;
+    clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = null;
+    return this.starting;
   }
 
   getState() {

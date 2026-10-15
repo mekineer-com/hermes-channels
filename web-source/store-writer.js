@@ -9,9 +9,12 @@ class StoreWriter {
     this.pending = new Map();
     this.exitedError = null;
     this.closing = false;
+    this.draining = false;
     const scriptPath = path.join(__dirname, 'store.py');
-    this.proc = spawn('python3', [scriptPath, '--db', dbPath], {
+    this.proc = spawn(process.env.CHANNELS_STORE_PYTHON || 'python3', [scriptPath, '--db', dbPath], {
       stdio: ['pipe', 'pipe', 'pipe'],
+      windowsHide: true,
+      detached: process.platform === 'win32',
     });
     this.proc.stdout.setEncoding('utf8');
     this.proc.stderr.setEncoding('utf8');
@@ -26,7 +29,14 @@ class StoreWriter {
       }
     });
     this.proc.stderr.on('data', (chunk) => process.stderr.write(`[store] ${chunk}`));
-    this.proc.on('exit', (code, signal) => {
+    this.closed = new Promise((resolve) => this.proc.once('close', (code, signal) => resolve({ code, signal })));
+    this.proc.on('error', (error) => {
+      this.exitedError = error;
+      for (const { reject } of this.pending.values()) reject(error);
+      this.pending.clear();
+      if (onExit) onExit(error);
+    });
+    this.proc.on('close', (code, signal) => {
       const error = new Error(`store writer exited code=${code} signal=${signal}`);
       this.exitedError = error;
       for (const { reject } of this.pending.values()) reject(error);
@@ -58,13 +68,14 @@ class StoreWriter {
     const requestId = this.nextId++;
     const command = { request_id: requestId, op, ...payload };
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
+      const timer = this.draining ? null : setTimeout(() => {
         this.pending.delete(requestId);
         const error = new Error(`store command timed out after ${timeoutMs}ms: op=${op}`);
         reject(error);
         this.proc.kill('SIGKILL');
       }, timeoutMs);
       this.pending.set(requestId, {
+        timer,
         resolve: (v) => { clearTimeout(timer); resolve(v); },
         reject: (e) => { clearTimeout(timer); reject(e); },
       });
@@ -77,9 +88,20 @@ class StoreWriter {
     });
   }
 
+  drain() {
+    this.draining = true;
+    for (const { timer } of this.pending.values()) clearTimeout(timer);
+  }
+
   close() {
+    if (this.closePromise) return this.closePromise;
+    this.drain();
     this.closing = true;
     if (!this.exitedError) this.proc.stdin.end();
+    this.closePromise = this.closed.then(({ code, signal }) => {
+      if (code !== 0 || signal) throw this.exitedError;
+    });
+    return this.closePromise;
   }
 }
 

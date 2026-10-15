@@ -71,8 +71,6 @@ async function main() {
       { immediate: true },
     );
   });
-  await store.command('ping');
-  status.write({ state: 'starting', wwebjs_ready: false, db_writeable: true }, { immediate: true });
 
   const client = new Client(buildClientOptions({
     LocalAuth,
@@ -112,6 +110,66 @@ async function main() {
     dbWriteable: () => !store.exitedError,
   });
   let fatalHandled = false;
+  let stopping = false;
+  let shutdownPromise;
+  let shutdownCode = 0;
+  let initializing;
+  const admitted = new Set();
+
+  function admit(handler, ...args) {
+    if (stopping) return;
+    const work = Promise.resolve(handler(...args));
+    admitted.add(work);
+    work.then(() => admitted.delete(work), (error) => {
+      admitted.delete(work);
+      shutdownFatal(error);
+    });
+    return work;
+  }
+
+  function on(event, handler) {
+    client.on(event, (...args) => admit(handler, ...args));
+  }
+
+  function shutdown(code = 0) {
+    shutdownCode ||= code;
+    if (shutdownPromise) return shutdownPromise;
+    stopping = true;
+    store.drain();
+    if (shutdownCode === 0) {
+      status.write({ state: 'stopping', wwebjs_ready: false, db_writeable: !store.exitedError }, { immediate: true });
+    }
+    const contactStopped = contacts.stop();
+    const diagnosticsStopped = memoryDiagnostics.stop();
+    shutdownPromise = (async () => {
+      await initializing;
+      await Promise.allSettled([...admitted, contactStopped, diagnosticsStopped]);
+      const browser = client.pupBrowser;
+      const browserProcess = browser?.process();
+      if (browserProcess && browserProcess.exitCode === null && browserProcess.signalCode === null) {
+        const browserClosed = new Promise(resolve => browserProcess.once('close', resolve));
+        const session = await browser.target().createCDPSession();
+        // browser.close() has a Puppeteer forced-kill fallback; use its existing CDP channel.
+        await session.send('Browser.close', {}, { timeout: 0 }).catch(error => {
+          console.warn('browser close response:', error.message);
+        });
+        await browserClosed;
+        await browser.disconnect();
+      }
+      await client.destroy().catch(() => {});
+      await store.close();
+      if (shutdownCode === 0) status.write({ state: 'stopping', wwebjs_ready: false }, { immediate: true });
+      status.flush();
+      process.stdin.pause();
+      process.exitCode = shutdownCode;
+    })();
+    shutdownPromise.catch((error) => {
+      console.error('web-source shutdown failed:', error);
+      status.write({ state: 'degraded', error: error.message, db_writeable: false }, { immediate: true });
+      process.exitCode = 1;
+    });
+    return shutdownPromise;
+  }
 
   async function shutdownFatal(error) {
     if (fatalHandled) return;
@@ -122,12 +180,7 @@ async function main() {
       { state: 'degraded', wwebjs_ready: wwebjsReady, db_writeable: !store.exitedError, error: error?.message || String(error) },
       { immediate: true },
     );
-    contacts.stop();
-    memoryDiagnostics.stop();
-    await client.destroy().catch(() => {});
-    store.close();
-    status.flush();
-    process.exit(1);
+    shutdown(1);
   }
 
   process.once('uncaughtException', shutdownFatal);
@@ -178,28 +231,23 @@ async function main() {
     );
   }
 
-  client.on('qr', (qr) => {
+  on('qr', (qr) => {
     console.log('Pair WhatsApp Web with the QR shown by the launcher.');
     status.write({ state: 'pairing', qr, wwebjs_ready: false, db_writeable: true }, { immediate: true });
   });
 
-  client.on('authenticated', () => {
+  on('authenticated', () => {
     console.log('WhatsApp Web source authenticated');
     status.write({ state: 'authenticated', qr: null, wwebjs_ready: false, db_writeable: true }, { immediate: true });
   });
 
-  client.on('auth_failure', (message) => {
+  on('auth_failure', (message) => {
     console.error('WhatsApp Web source auth failure:', message);
     status.write({ state: 'auth_failure', qr: null, wwebjs_ready: false, db_writeable: !store.exitedError, error: String(message) }, { immediate: true });
-    contacts.stop();
-    memoryDiagnostics.stop();
-    client.destroy().catch(() => {});
-    store.close();
-    status.flush();
-    process.exit(1);
+    shutdown(1);
   });
 
-  client.on('ready', async () => {
+  on('ready', async () => {
     console.log('WhatsApp Web source ready');
     wwebjsReady = true;
     status.write({ state: 'ready', qr: null, wwebjs_ready: true, db_writeable: true, error: null }, { immediate: true });
@@ -212,7 +260,7 @@ async function main() {
     }
     try {
       if (!removeMessageHookExposed) {
-        await client.pupPage.exposeFunction('__hermesWebSourceMessageRemoved', markRemovedMessage);
+        await client.pupPage.exposeFunction('__hermesWebSourceMessageRemoved', (raw) => admit(markRemovedMessage, raw));
         removeMessageHookExposed = true;
       }
       await installRemoveMessageHook(client.pupPage);
@@ -223,7 +271,7 @@ async function main() {
         last_remove_hook_error_at: Math.floor(Date.now() / 1000),
       });
     }
-    memoryDiagnostics.schedule();
+    if (!stopping) memoryDiagnostics.schedule();
 
     if (backfillSince > 0) {
       try {
@@ -295,68 +343,65 @@ async function main() {
 
     await contacts.snapshot().catch((error) => contacts.snapshotFailed(error));
     await contacts.pruneScopeOnce().catch((error) => persistFailed('scope prune', error));
-    contacts.schedule();
+    if (!stopping) contacts.schedule();
 
     if (exitAfterBackfill && (backfillSince > 0 || backfillChat)) {
-      await client.destroy();
-      store.close();
-      status.flush();
-      process.exit(0);
+      shutdown();
     }
   });
 
-  client.on(Events.MESSAGE_CREATE, (message) => {
-    persistMessage(message, 'event:message_create', { enrichContacts: true })
+  on(Events.MESSAGE_CREATE, (message) => {
+    return persistMessage(message, 'event:message_create', { enrichContacts: true })
       .catch((error) => persistFailed('persist message_create', error));
   });
 
-  client.on(Events.MESSAGE_RECEIVED, (message) => {
-    persistMessage(message, 'event:message', { enrichContacts: true })
+  on(Events.MESSAGE_RECEIVED, (message) => {
+    return persistMessage(message, 'event:message', { enrichContacts: true })
       .catch((error) => persistFailed('persist message', error));
   });
 
-  client.on(Events.MESSAGE_EDIT, (message) => {
-    persistMessage(message, 'event:message_edit', { enrichContacts: true })
+  on(Events.MESSAGE_EDIT, (message) => {
+    return persistMessage(message, 'event:message_edit', { enrichContacts: true })
       .catch((error) => persistFailed('persist message_edit', error));
   });
 
-  client.on(Events.MESSAGE_CIPHERTEXT, (message) => {
-    persistMessage(message, 'event:message_ciphertext', { enrichContacts: true })
+  on(Events.MESSAGE_CIPHERTEXT, (message) => {
+    return persistMessage(message, 'event:message_ciphertext', { enrichContacts: true })
       .catch((error) => persistFailed('persist ciphertext', error));
   });
 
-  client.on(Events.MESSAGE_CIPHERTEXT_FAILED, (message) => {
-    persistMessage(message, 'event:message_ciphertext_failed', { enrichContacts: true })
+  on(Events.MESSAGE_CIPHERTEXT_FAILED, (message) => {
+    return persistMessage(message, 'event:message_ciphertext_failed', { enrichContacts: true })
       .catch((error) => persistFailed('persist ciphertext_failed', error));
   });
 
-  client.on(Events.MESSAGE_ACK, (message, ack) => {
+  on(Events.MESSAGE_ACK, (message, ack) => {
     const msgKey = messageKey(message);
     if (!msgKey) return;
-    store.command('update_ack', { row: { msg_key: msgKey, ack } }).catch((error) => persistFailed('ack update', error));
+    return store.command('update_ack', { row: { msg_key: msgKey, ack } }).catch((error) => persistFailed('ack update', error));
   });
 
-  client.on(Events.MESSAGE_REVOKED_ME, (message) => {
+  on(Events.MESSAGE_REVOKED_ME, (message) => {
     const msgKey = messageKey(message);
     if (!msgKey) return;
-    store.command('mark_revoked', { row: { msg_key: msgKey, source: 'event:message_revoke_me', raw: message.rawData || {} } })
+    return store.command('mark_revoked', { row: { msg_key: msgKey, source: 'event:message_revoke_me', raw: message.rawData || {} } })
       .catch((error) => persistFailed('revoke_me update', error));
   });
 
-  client.on(Events.MESSAGE_REVOKED_EVERYONE, (message, revokedMessage) => {
+  on(Events.MESSAGE_REVOKED_EVERYONE, (message, revokedMessage) => {
     const target = revokedMessage || message;
     const msgKey = messageKey(target);
     if (!msgKey) return;
-    store.command('mark_revoked', { row: { msg_key: msgKey, source: 'event:message_revoke_everyone', raw: message.rawData || {} } })
+    return store.command('mark_revoked', { row: { msg_key: msgKey, source: 'event:message_revoke_everyone', raw: message.rawData || {} } })
       .catch((error) => persistFailed('revoke_everyone update', error));
   });
 
-  client.on(Events.MESSAGE_REACTION, (reaction) => {
+  on(Events.MESSAGE_REACTION, (reaction) => {
     const msgId = reaction.msgId;
     const msgKey = msgId?._serialized || (typeof msgId === 'string' ? msgId : null);
     if (!msgKey) return;
     const senderLocalId = jidLocal(reaction.senderId);
-    store.command('apply_reaction', {
+    return store.command('apply_reaction', {
       row: {
         msg_key: msgKey,
         sender_local_id: senderLocalId,
@@ -365,39 +410,28 @@ async function main() {
     }).catch((error) => persistFailed('apply_reaction', error));
   });
 
-  client.on('disconnected', (reason) => {
+  on('disconnected', (reason) => {
     console.error('WhatsApp Web source disconnected:', reason);
     wwebjsReady = false;
     status.write({ state: 'disconnected', wwebjs_ready: false, db_writeable: !store.exitedError, error: String(reason) }, { immediate: true });
-    contacts.stop();
-    memoryDiagnostics.stop();
-    // The library calls destroy() itself before emitting this event, so no recovery is possible.
-    // Exit so the process death is visible and the gateway can restart.
-    store.close();
-    status.flush();
-    process.exit(String(reason).toUpperCase() === 'LOGOUT' ? 42 : 1);
+    // Preserve the existing logout classification after admitted writes drain.
+    shutdown(String(reason).toUpperCase() === 'LOGOUT' ? 42 : 1);
   });
 
-  process.on('SIGINT', async () => {
-    status.write({ state: 'stopping', wwebjs_ready: false, db_writeable: !store.exitedError }, { immediate: true });
-    contacts.stop();
-    memoryDiagnostics.stop();
-    await client.destroy().catch(() => {});
-    store.close();
-    status.flush();
-    process.exit(0);
-  });
-  process.on('SIGTERM', async () => {
-    status.write({ state: 'stopping', wwebjs_ready: false, db_writeable: !store.exitedError }, { immediate: true });
-    contacts.stop();
-    memoryDiagnostics.stop();
-    await client.destroy().catch(() => {});
-    store.close();
-    status.flush();
-    process.exit(0);
-  });
+  process.on('SIGINT', () => shutdown());
+  process.on('SIGTERM', () => shutdown());
+  if (process.env.CHANNELS_MANAGED_STDIN === '1') {
+    process.stdin.on('end', () => shutdown());
+    process.stdin.resume();
+  }
 
-  await client.initialize().catch(shutdownFatal);
+  initializing = (async () => {
+    await store.command('ping');
+    if (stopping) return;
+    status.write({ state: 'starting', wwebjs_ready: false, db_writeable: true }, { immediate: true });
+    await client.initialize();
+  })().catch((error) => { shutdownFatal(error); });
+  await initializing;
 }
 
 main().catch((error) => {

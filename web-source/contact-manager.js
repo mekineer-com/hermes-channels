@@ -205,16 +205,16 @@ class ContactManager {
   schedule() {
     if (!this.enabled || this.intervalSeconds <= 0 || this.timer) return;
     this.timer = setInterval(() => {
-      if (!this.isReady()) return;
-      this.snapshot().catch((error) => this.snapshotFailed(error));
+      if (!this.isReady() || this.running) return;
+      this.snapshotTask = this.snapshot().catch((error) => this.snapshotFailed(error));
     }, this.intervalSeconds * 1000);
     if (this.timer.unref) this.timer.unref();
   }
 
   stop() {
-    if (!this.timer) return;
     clearInterval(this.timer);
     this.timer = null;
+    return this.snapshotTask;
   }
 }
 

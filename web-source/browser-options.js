@@ -30,6 +30,9 @@ function buildClientOptions({
     ...(userAgent ? { userAgent } : {}),
     puppeteer: {
       headless,
+      handleSIGINT: false,
+      handleSIGTERM: false,
+      handleSIGHUP: false,
       ...(executablePath ? { executablePath } : {}),
       args: browserArgs(disableServiceWorkers),
     },

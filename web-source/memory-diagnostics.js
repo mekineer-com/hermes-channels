@@ -191,11 +191,12 @@ class MemoryDiagnostics {
 
   schedule() {
     if (this.intervalSeconds <= 0 || this.timer) return;
-    this.collect().catch((error) => {
+    this.collectTask = this.collect().catch((error) => {
       this.logger.warn('memory diagnostics failed:', error.message);
     });
     this.timer = setInterval(() => {
-      this.collect().catch((error) => {
+      if (this.running) return;
+      this.collectTask = this.collect().catch((error) => {
         this.logger.warn('memory diagnostics failed:', error.message);
       });
     }, this.intervalSeconds * 1000);
@@ -203,9 +204,9 @@ class MemoryDiagnostics {
   }
 
   stop() {
-    if (!this.timer) return;
     clearInterval(this.timer);
     this.timer = null;
+    return this.collectTask;
   }
 }
 

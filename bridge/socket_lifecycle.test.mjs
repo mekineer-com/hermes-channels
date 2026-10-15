@@ -51,3 +51,23 @@ test('socket lifecycle falls back when Baileys version fetch is invalid', async 
 
   assert.deepEqual(await lifecycle.fetchVersion(), [2, 3000, 1023223821]);
 });
+
+test('stop cancels reconnect and waits for an admitted socket start without retry', async () => {
+  let failStart;
+  let starts = 0;
+  const lifecycle = makeLifecycle({ onStart: () => {
+    starts += 1;
+    return new Promise((_resolve, reject) => { failStart = reject; });
+  } });
+  lifecycle.startNow();
+  lifecycle.scheduleStart(10);
+  const stopped = lifecycle.stop();
+  assert.equal(lifecycle.stop(), stopped);
+  assert.equal(lifecycle.reconnectTimer, null);
+  failStart(new Error('fictional start failure during drain'));
+  await stopped;
+  lifecycle.scheduleStart(10);
+  lifecycle.startNow();
+  assert.equal(lifecycle.reconnectTimer, null);
+  assert.equal(starts, 1);
+});
