@@ -35,14 +35,15 @@ test('source daemon distinguishes logout for pairing recovery', () => {
 });
 
 function deferred() {
-  let resolve;
-  const promise = new Promise(done => { resolve = done; });
-  return { promise, resolve };
+  let resolve, reject;
+  const promise = new Promise((done, fail) => { resolve = done; reject = fail; });
+  return { promise, resolve, reject };
 }
 
-async function fixture({ startupBlocked = false } = {}) {
-  const calls = [];
+async function fixture({ startupBlocked = false, backfillMode = null } = {}) {
+  const calls = [], statuses = [];
   const enrichment = deferred(), writerExit = deferred(), initialize = deferred();
+  const backfill = deferred();
   const browserProcess = new EventEmitter();
   Object.assign(browserProcess, { exitCode: null, signalCode: null });
   const browser = {
@@ -72,6 +73,7 @@ async function fixture({ startupBlocked = false } = {}) {
       calls.push('destroy');
       this.emit('disconnected', 'LOGOUT');
     }
+    async getChatById() { return {}; }
   }
   class StoreWriter {
     async command(op) { calls.push(op); return {}; }
@@ -93,7 +95,7 @@ async function fixture({ startupBlocked = false } = {}) {
     stop() {}
   }
   class StatusWriter {
-    write(row) { calls.push(`status:${row.state}`); }
+    write(row) { calls.push(`status:${row.state}`); statuses.push(row); }
     flush() { calls.push('status-flush'); }
   }
   const process = new EventEmitter();
@@ -102,11 +104,17 @@ async function fixture({ startupBlocked = false } = {}) {
   process.stdin.pause = () => {};
   process.env = { CHANNELS_MANAGED_STDIN: '1', CHANNELS_HOME: '/fictional-disposable' };
   process.argv = ['node', 'source-daemon.js'];
+  if (backfillMode === 'since') process.argv.push('--backfill-since', '1');
+  if (backfillMode === 'chat') process.argv.push('--backfill-chat', 'fictional-chat');
   process.exit = code => assert.fail(`early process.exit(${code})`);
   const realRequire = createRequire(import.meta.url);
   const stubs = {
     'whatsapp-web.js': { Client, LocalAuth: class {}, Events: new Proxy({}, { get: (_target, event) => event.toLowerCase() }) },
     './store-writer': { StoreWriter }, './contact-manager': { ContactManager },
+    './backfill-manager': { BackfillManager: class {
+      chatsSince() { return backfill.promise; }
+      chatMessages() { return backfill.promise; }
+    } },
     './memory-diagnostics': { MemoryDiagnostics, memoryStatsMb: () => ({}) },
     './status-writer': { StatusWriter }, './browser-options': { buildClientOptions: () => ({}) },
     './page-hooks': { configureResourceBlocking: async () => {}, installRemoveMessageHook: async () => {} },
@@ -116,7 +124,32 @@ async function fixture({ startupBlocked = false } = {}) {
   const context = { process, console, __dirname: here, require: name => stubs[name] || realRequire(name) };
   runInNewContext(source.slice(0, source.lastIndexOf('main().catch(')) + '\nglobalThis.started = main();', context);
   await new Promise(setImmediate);
-  return { calls, process, client, browserProcess, enrichment, writerExit, initialize, started: context.started };
+  return { calls, statuses, process, client, browserProcess, enrichment, writerExit, initialize, backfill, started: context.started };
+}
+
+for (const backfillMode of ['since', 'chat']) {
+  for (const disconnected of [false, true]) {
+    test(`${backfillMode} backfill failure preserves readiness after disconnect=${disconnected}`, async () => {
+      const f = await fixture({ backfillMode });
+      await f.started;
+      if (disconnected) f.client.emit('disconnected', 'Fixture connection lost');
+      f.backfill.reject(new Error('Fixture backfill failure'));
+      await new Promise(setImmediate);
+      const failed = f.statuses.find(row => row.error === 'Fixture backfill failure');
+      try {
+        assert.equal(failed?.state, 'degraded');
+        assert.equal(failed.wwebjs_ready, !disconnected);
+      } finally {
+        f.process.stdin.emit('end');
+        await new Promise(setImmediate);
+        f.browserProcess.exitCode = 0;
+        f.browserProcess.emit('close', 0);
+        f.writerExit.resolve();
+        await new Promise(setImmediate);
+      }
+      assert.equal(f.process.exitCode, disconnected ? 1 : 0);
+    });
+  }
 }
 
 for (const signal of ['SIGINT', 'SIGTERM', 'end']) {

@@ -305,11 +305,7 @@ async function main() {
         }
         status.write(backfillStatus, { immediate: true });
       } catch (error) {
-        console.error('backfill failed:', error);
-        status.write(
-          { state: 'degraded', wwebjs_ready: true, db_writeable: !store.exitedError, error: error.message },
-          { immediate: true },
-        );
+        persistFailed('backfill', error);
       }
     }
 
@@ -333,11 +329,7 @@ async function main() {
           last_backfill_updated: result.updated,
         }, { immediate: true });
       } catch (error) {
-        console.error('backfill failed:', error);
-        status.write(
-          { state: 'degraded', wwebjs_ready: true, db_writeable: !store.exitedError, error: error.message },
-          { immediate: true },
-        );
+        persistFailed('backfill', error);
       }
     }
 
