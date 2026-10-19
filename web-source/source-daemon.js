@@ -158,7 +158,7 @@ async function main() {
       }
       await client.destroy().catch(() => {});
       await store.close();
-      status.write({ state: 'stopping', wwebjs_ready: false }, { immediate: true });
+      status.write({ state: shutdownCode === 0 ? 'stopping' : 'degraded', wwebjs_ready: false }, { immediate: true });
       status.flush();
       process.stdin.pause();
       process.exitCode = shutdownCode;

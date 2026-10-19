@@ -172,7 +172,7 @@ for (const backfillMode of ['since', 'chat']) {
       f.writerExit.resolve();
       await new Promise(setImmediate);
       const final = Object.assign({}, ...f.statuses);
-      assert.equal(final.state, 'stopping');
+      assert.equal(final.state, reason ? 'degraded' : 'stopping');
       assert.equal(final.wwebjs_ready, false);
       assert.equal(f.process.exitCode, reason === 'LOGOUT' ? 42 : reason ? 1 : 0);
       assert.equal(f.calls.at(-1), 'status-flush');
@@ -196,7 +196,23 @@ test('fatal shutdown clears readiness after admitted message persistence succeed
   f.writerExit.resolve();
   await new Promise(setImmediate);
   const final = Object.assign({}, ...f.statuses);
-  assert.equal(final.state, 'stopping');
+  assert.equal(final.state, 'degraded');
+  assert.equal(final.wwebjs_ready, false);
+  assert.equal(f.process.exitCode, 1);
+});
+
+test('authentication failure stays degraded after shutdown', async () => {
+  const f = await fixture();
+  await f.started;
+  f.client.emit('auth_failure', 'Fictional authentication failure');
+  await new Promise(setImmediate);
+  f.browserProcess.exitCode = 0;
+  f.browserProcess.emit('close', 0);
+  f.writerExit.resolve();
+  await new Promise(setImmediate);
+  const final = Object.assign({}, ...f.statuses);
+  assert.equal(final.state, 'degraded');
+  assert.equal(final.error, 'Fictional authentication failure');
   assert.equal(final.wwebjs_ready, false);
   assert.equal(f.process.exitCode, 1);
 });
@@ -285,7 +301,7 @@ test('source retains a fatal outcome arriving during ordinary shutdown', async (
   await new Promise(setImmediate);
   assert.equal(f.calls.filter(call => call === 'writer-drain').length, 1);
   assert.equal(f.calls.filter(call => call === 'destroy').length, 1);
-  assert.equal(f.statuses.at(-1).state, 'stopping');
+  assert.equal(f.statuses.at(-1).state, 'degraded');
   assert.equal(f.statuses.at(-1).wwebjs_ready, false);
   assert.equal(f.process.exitCode, 1);
 });
