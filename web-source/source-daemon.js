@@ -158,14 +158,14 @@ async function main() {
       }
       await client.destroy().catch(() => {});
       await store.close();
-      if (shutdownCode === 0) status.write({ state: 'stopping', wwebjs_ready: false }, { immediate: true });
+      status.write({ state: 'stopping', wwebjs_ready: false }, { immediate: true });
       status.flush();
       process.stdin.pause();
       process.exitCode = shutdownCode;
     })();
     shutdownPromise.catch((error) => {
       console.error('web-source shutdown failed:', error);
-      status.write({ state: 'degraded', error: error.message, db_writeable: false }, { immediate: true });
+      status.write({ state: 'degraded', wwebjs_ready: false, error: error.message, db_writeable: false }, { immediate: true });
       process.exitCode = 1;
     });
     return shutdownPromise;

@@ -152,6 +152,72 @@ for (const backfillMode of ['since', 'chat']) {
   }
 }
 
+for (const backfillMode of ['since', 'chat']) {
+  for (const reason of [null, 'Fixture connection lost', 'LOGOUT']) {
+    test(`${backfillMode} late success cannot leave shutdown paired (${reason || 'Stop'})`, async () => {
+      const f = await fixture({ backfillMode });
+      await f.started;
+      if (reason) f.client.emit('disconnected', reason);
+      else f.process.stdin.emit('end');
+      f.backfill.resolve({
+        scannedChats: 1, fetched: 1, inserted: 1, updated: 0,
+        backfilledChats: 1, incompleteChatIds: [], skippedBeforeSince: 0, reconciledRevoked: 0,
+      });
+      await new Promise(setImmediate);
+      assert.ok(f.statuses.some(row => row.last_backfill_at), 'Late successful backfill must run');
+      assert.ok(f.calls.includes('browser-close-request'));
+      assert.ok(!f.calls.includes('writer-eof'));
+      f.browserProcess.exitCode = 0;
+      f.browserProcess.emit('close', 0);
+      f.writerExit.resolve();
+      await new Promise(setImmediate);
+      const final = Object.assign({}, ...f.statuses);
+      assert.equal(final.state, 'stopping');
+      assert.equal(final.wwebjs_ready, false);
+      assert.equal(f.process.exitCode, reason === 'LOGOUT' ? 42 : reason ? 1 : 0);
+      assert.equal(f.calls.at(-1), 'status-flush');
+    });
+  }
+}
+
+test('fatal shutdown clears readiness after admitted message persistence succeeds', async () => {
+  const f = await fixture();
+  await f.started;
+  f.client.emit('message_create', { id: 'fictional-pending-message' });
+  f.process.emit('unhandledRejection', new Error('Fixture fatal failure'));
+  await new Promise(setImmediate);
+  assert.ok(!f.calls.includes('browser-close-request'));
+  f.enrichment.resolve();
+  await new Promise(setImmediate);
+  assert.ok(f.calls.includes('upsert_message'));
+  assert.ok(f.calls.includes('browser-close-request'));
+  f.browserProcess.exitCode = 0;
+  f.browserProcess.emit('close', 0);
+  f.writerExit.resolve();
+  await new Promise(setImmediate);
+  const final = Object.assign({}, ...f.statuses);
+  assert.equal(final.state, 'stopping');
+  assert.equal(final.wwebjs_ready, false);
+  assert.equal(f.process.exitCode, 1);
+});
+
+test('shutdown failure clears readiness after late success', async () => {
+  const f = await fixture({ backfillMode: 'chat' });
+  await f.started;
+  f.client.emit('disconnected', 'Fixture connection lost');
+  f.backfill.resolve({ fetched: 1, inserted: 1, updated: 0 });
+  await new Promise(setImmediate);
+  f.browserProcess.exitCode = 0;
+  f.browserProcess.emit('close', 0);
+  f.writerExit.reject(new Error('Fixture writer close failure'));
+  await new Promise(setImmediate);
+  const final = Object.assign({}, ...f.statuses);
+  assert.equal(final.state, 'degraded');
+  assert.equal(final.error, 'Fixture writer close failure');
+  assert.equal(final.wwebjs_ready, false);
+  assert.equal(f.process.exitCode, 1);
+});
+
 for (const signal of ['SIGINT', 'SIGTERM', 'end']) {
   test(`source ${signal} drains contact enrichment, browser exit and writer exit in order`, async () => {
     const f = await fixture();
@@ -219,6 +285,7 @@ test('source retains a fatal outcome arriving during ordinary shutdown', async (
   await new Promise(setImmediate);
   assert.equal(f.calls.filter(call => call === 'writer-drain').length, 1);
   assert.equal(f.calls.filter(call => call === 'destroy').length, 1);
-  assert.equal(f.calls.filter(call => call === 'status:stopping').length, 1);
+  assert.equal(f.statuses.at(-1).state, 'stopping');
+  assert.equal(f.statuses.at(-1).wwebjs_ready, false);
   assert.equal(f.process.exitCode, 1);
 });
