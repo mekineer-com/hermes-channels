@@ -85,7 +85,7 @@ test('snapshot writes scoped contact status fields', async () => {
   });
 });
 
-test('pruneScopeOnce uses one active-since metadata guard and records backup path', async () => {
+test('pruneScopeOnce uses one active-since metadata guard and records backup path', async t => {
   const { contactManager, commands, writes } = manager();
 
   await contactManager.pruneScopeOnce();
@@ -108,6 +108,15 @@ test('pruneScopeOnce uses one active-since metadata guard and records backup pat
     last_prune_deleted_contacts: 3,
     last_prune_backup_path: '/tmp/web_source.db.bak-prune-stamp',
   });
+
+  commands.length = 0;
+  t.mock.method(contactManager.store, 'command', async (op, payload) => {
+    commands.push({ op, payload });
+    return { value: '1' };
+  });
+  await contactManager.pruneScopeOnce();
+  assert.deepEqual(commands, [{ op: 'get_metadata', payload: { key: 'prune_scope:1000' } }]);
+  assert.equal(writes.length, 1);
 });
 
 test('stop awaits an admitted periodic snapshot without replacing its promise on a busy tick', async t => {

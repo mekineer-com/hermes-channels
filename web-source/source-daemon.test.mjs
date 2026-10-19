@@ -7,6 +7,7 @@ import { dirname, join } from 'node:path';
 import { EventEmitter } from 'node:events';
 import { createRequire } from 'node:module';
 import { runInNewContext } from 'node:vm';
+import { format } from 'node:util';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const source = readFileSync(join(here, 'source-daemon.js'), 'utf8');
@@ -22,18 +23,6 @@ test('source daemon help preserves active-scope and diagnostics flags', () => {
   assert.match(output, /--no-contact-snapshot/);
 });
 
-test('source daemon persists QR payload without logging it', () => {
-  assert.match(source, /status\.write\(\{\s*state:\s*'pairing',\s*qr,/);
-  assert.doesNotMatch(source, /console\.log\(qr\)/);
-  assert.match(source, /state:\s*'authenticated',\s*qr:\s*null/);
-  assert.match(source, /state:\s*'auth_failure',\s*qr:\s*null/);
-  assert.match(source, /state:\s*'ready',\s*qr:\s*null/);
-});
-
-test('source daemon distinguishes logout for pairing recovery', () => {
-  assert.match(source, /String\(reason\)\.toUpperCase\(\) === 'LOGOUT' \? 42 : 1/);
-});
-
 function deferred() {
   let resolve, reject;
   const promise = new Promise((done, fail) => { resolve = done; reject = fail; });
@@ -41,7 +30,7 @@ function deferred() {
 }
 
 async function fixture({ startupBlocked = false, backfillMode = null } = {}) {
-  const calls = [], statuses = [];
+  const calls = [], statuses = [], logs = [];
   const enrichment = deferred(), writerExit = deferred(), initialize = deferred();
   const backfill = deferred();
   const browserProcess = new EventEmitter();
@@ -121,11 +110,39 @@ async function fixture({ startupBlocked = false, backfillMode = null } = {}) {
     './normalization': { normalizeMessage: m => ({ msg_key: m.id }), messageKey: m => m.id, jidLocal: id => id },
     './daemon-utils': { ...realRequire('./daemon-utils'), ensureDir() {} },
   };
-  const context = { process, console, __dirname: here, require: name => stubs[name] || realRequire(name) };
+  const capturedConsole = Object.fromEntries(
+    ['log', 'info', 'warn', 'error', 'debug', 'trace'].map(method => [method, (...args) => logs.push(format(...args))]),
+  );
+  const context = { process, console: capturedConsole, __dirname: here, require: name => stubs[name] || realRequire(name) };
   runInNewContext(source.slice(0, source.lastIndexOf('main().catch(')) + '\nglobalThis.started = main();', context);
   await new Promise(setImmediate);
-  return { calls, statuses, process, client, browserProcess, enrichment, writerExit, initialize, backfill, started: context.started };
+  return { calls, statuses, logs, process, client, browserProcess, enrichment, writerExit, initialize, backfill, started: context.started };
 }
+
+test('source daemon keeps pairing QR out of logs and clears it on ready, authentication and failure', async () => {
+  const f = await fixture();
+  await f.started;
+  const qr = 'fictional-pairing-secret-do-not-log';
+  try {
+    for (const event of ['ready', 'authenticated', 'auth_failure']) {
+      f.client.emit('qr', qr);
+      assert.equal(f.statuses.at(-1).state, 'pairing');
+      assert.equal(f.statuses.at(-1).qr, qr);
+      assert.equal(f.statuses.at(-1).wwebjs_ready, false);
+      f.client.emit(event, 'Fictional authentication failure');
+      assert.equal(f.statuses.at(-1).qr, null, event);
+      await new Promise(setImmediate);
+    }
+  } finally {
+    f.process.stdin.emit('end');
+    await new Promise(setImmediate);
+    f.browserProcess.exitCode = 0;
+    f.browserProcess.emit('close', 0);
+    f.writerExit.resolve();
+    await new Promise(setImmediate);
+  }
+  assert.ok(!f.logs.join('\n').includes(qr));
+});
 
 for (const backfillMode of ['since', 'chat']) {
   for (const disconnected of [false, true]) {

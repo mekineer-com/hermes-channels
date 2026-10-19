@@ -27,16 +27,8 @@ test('historyMessageSources includes top-level messaging-history messages', () =
   assert.equal(rows[1].chatFallback, '');
 });
 
-test('canonicalizeMessageIds re-normalizes after alias learning', () => {
-  const lidMap = { '247789598601266': '12025550199' };
-  const normalize = (value) => {
-    const raw = String(value || '').trim();
-    if (raw.endsWith('@lid')) {
-      const local = raw.split('@')[0];
-      return lidMap[local] ? `${lidMap[local]}@s.whatsapp.net` : raw;
-    }
-    return raw;
-  };
+test('canonicalizeMessageIds normalizes incoming DM chat and sender ids', () => {
+  const normalize = (value) => value === '247789598601266@lid' ? '12025550199@s.whatsapp.net' : value;
 
   const ids = canonicalizeMessageIds({
     chatId: '247789598601266@lid',
