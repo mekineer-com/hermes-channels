@@ -20,6 +20,7 @@ old Hermes framework. The intended shape is smaller:
 
 - `bridge/`: Baileys live-message bridge. Durable queue, message ingest,
   history ingest, known contacts/chats, sent-message echo tracking, media retry.
+  Baileys is pinned to an exact reviewed release in `bridge/package.json`.
   This should remain copy-equivalent to final working `hermes-agent` bridge code
   unless a Channels-specific path/config seam requires a small delta.
 - `web-source/`: whatsapp-web.js history/source daemon. Captures reconciled
@@ -138,6 +139,10 @@ Hermes:
 - Session rotation metadata matters because server readers chain through
   `parent_session_id`. A crash between `sessions.json` and DB session row write
   is a metadata hole, not message loss, but avoid worsening that window.
+- The launcher reads web-source readiness from
+  `whatsapp/web_source_status.json`. A failed backfill reports `degraded` but
+  keeps the current `wwebjs_ready`; every shutdown clears it, ending as
+  `stopping` after a clean exit and `degraded` otherwise.
 - Bridge-seq WAL dedup assumes the bridge queue directory is durable. If re-pair
   or queue wipe bugs appear, check for new bridge seq collisions against old
   daemon WAL rows before changing dispatch semantics.
