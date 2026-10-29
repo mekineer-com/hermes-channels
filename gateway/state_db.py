@@ -435,37 +435,6 @@ class ChannelsStateDB:
             ).fetchone()
         return dict(row) if row else None
 
-    def message_source_key_has_response(
-        self,
-        *,
-        source_chat_id: str,
-        source_message_id: str,
-    ) -> bool:
-        chat_key = str(source_chat_id or "").strip()
-        message_key = str(source_message_id or "").strip()
-        if not chat_key or not message_key:
-            return False
-        with self._lock:
-            response = self._conn.execute(
-                """
-                SELECT 1
-                  FROM messages source
-                 WHERE source.source_chat_id = ?
-                   AND source.source_message_id = ?
-                   AND EXISTS (
-                       SELECT 1
-                         FROM messages assistant
-                        WHERE assistant.session_id = source.session_id
-                          AND assistant.id > source.id
-                          AND assistant.role = 'assistant'
-                        LIMIT 1
-                   )
-                 LIMIT 1
-                """,
-                (chat_key, message_key),
-            ).fetchone()
-        return response is not None
-
     def stamp_latest_assistant_source_key(
         self,
         *,

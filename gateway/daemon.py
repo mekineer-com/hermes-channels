@@ -1706,18 +1706,6 @@ class ChannelsDaemon:
                 source_chat_id=source_chat_id,
                 source_message_id=source_message_id,
             )
-            if not handled and not raw.get("hasMedia"):
-                # Deferred media needs exact completion evidence: a newer
-                # assistant row may answer an unrelated message.
-                handled = self._db.message_source_key_has_response(
-                    source_chat_id=source_chat_id,
-                    source_message_id=source_message_id,
-                )
-                if handled:
-                    self._db.mark_message_source_key_processed(
-                        source_chat_id=source_chat_id,
-                        source_message_id=source_message_id,
-                    )
         except Exception:
             logger.error("Failed to check WhatsApp duplicate source key", exc_info=True)
             return False

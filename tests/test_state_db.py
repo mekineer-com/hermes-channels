@@ -3,7 +3,7 @@ import sqlite3
 from gateway.state_db import ChannelsStateDB
 
 
-def test_state_db_dedup_response_fallback_and_active_since(tmp_path):
+def test_state_db_processed_source_and_active_since(tmp_path):
     db = ChannelsStateDB(tmp_path / "state.db")
     db.create_session("s1", "whatsapp", user_id="u1")
     db.append_message(
@@ -15,10 +15,10 @@ def test_state_db_dedup_response_fallback_and_active_since(tmp_path):
         timestamp=100,
     )
     assert db.message_source_key_exists(source_chat_id="chat@lid", source_message_id="m1")
-    assert not db.message_source_key_has_response(source_chat_id="chat@lid", source_message_id="m1")
+    assert not db.message_source_key_is_processed(source_chat_id="chat@lid", source_message_id="m1")
 
     db.append_message("s1", "assistant", "hi", timestamp=101)
-    assert db.message_source_key_has_response(source_chat_id="chat@lid", source_message_id="m1")
+    assert not db.message_source_key_is_processed(source_chat_id="chat@lid", source_message_id="m1")
     assert db.mark_message_source_key_processed(source_chat_id="chat@lid", source_message_id="m1")
     assert db.message_source_key_is_processed(source_chat_id="chat@lid", source_message_id="m1")
 

@@ -261,17 +261,17 @@ def test_dedup_gate_marks_wal_processed(tmp_path, monkeypatch):
     asyncio.run(run())
 
 
-def test_duplicate_source_check_fails_open_on_response_check_error(tmp_path, monkeypatch):
+def test_reply_without_processed_source_does_not_suppress_delivery(tmp_path, monkeypatch):
     daemon = make_daemon(tmp_path, monkeypatch)
-    daemon._db.message_source_key_is_processed = lambda **_kwargs: False
-
-    def fail_response(**_kwargs):
-        raise sqlite3.OperationalError("locked")
-
-    daemon._db.message_source_key_has_response = fail_response
-
     try:
+        entry = daemon.get_or_create_history_session(event().source)
+        daemon._db.append_message(entry.session_id, "user", "hello",
+                                  source_chat_id="123@lid", source_message_id="m1")
+        daemon._db.append_message(entry.session_id, "assistant", "A saved reply")
         assert daemon._is_duplicate_source_message(event().raw_message) is False
+        assert not daemon._db.message_source_key_is_processed(source_chat_id="123@lid", source_message_id="m1")
+        daemon._db.mark_message_source_key_processed(source_chat_id="123@lid", source_message_id="m1")
+        assert daemon._is_duplicate_source_message(event().raw_message) is True
     finally:
         asyncio.run(daemon.disconnect())
 
@@ -1512,7 +1512,6 @@ def test_history_then_live_records_both_arrivals_and_turns_once(tmp_path, monkey
             assert not daemon._db.message_source_key_is_processed(source_chat_id="123@lid", source_message_id="same-1")
             entry = daemon.get_or_create_history_session(hist.source)
             daemon._db.append_message(entry.session_id, "assistant", "Reply to another message")
-            assert daemon._db.message_source_key_has_response(source_chat_id="123@lid", source_message_id="same-1")
             assert daemon._history_event_can_trigger_turn(live)
         if record_arrivals:
             daemon._record_whatsapp_arrival_raw(live.raw_message)

@@ -98,9 +98,10 @@ Hermes:
   source key leaves batching and before `processed_source_keys` is written.
 - `_is_history_live_text_copy` is load-bearing. It prevents history+live copies
   from merging duplicate text before the first flush.
-- Do not restore bare `message_source_key_exists` as a duplicate skip. History
-  rows can exist before the live turn has been answered; only processed ledger,
-  response-exists fallback, and active source key should suppress response.
+- Do not infer completion from persisted messages or later replies. Only the
+  processed ledger and active source key suppress duplicate incoming turns.
+  A crash after saving a reply but before marking its source processed may cause
+  another reply; that trade-off is accepted to keep one rule for text and media.
 - Do not add a blanket bot-mode `fromMe` drop. Final working Hermes allows
   phone-originated `fromMe` messages through; bot echoes are filtered through
   sent-message echo tracking.
