@@ -1681,7 +1681,7 @@ class ChannelsDaemon:
             return False
         if str(raw.get("speakerRoleHint") or "").strip().lower() == "assistant":
             return False
-        # History placeholders must not consume the later downloaded media copy.
+        # Incomplete media history must not consume a response claim.
         if raw.get("hasMedia") and not event.media_urls:
             return False
         if not str(event.text or "").strip() and not raw.get("hasMedia"):
@@ -1706,11 +1706,9 @@ class ChannelsDaemon:
                 source_chat_id=source_chat_id,
                 source_message_id=source_message_id,
             )
-            if not handled:
-                # A bare persisted row is NOT handled: history-sync copies are
-                # persist-only (stored, never answered), so the live copy must
-                # still get its turn. Skip only when a response exists or the
-                # key was marked processed (covers listen-only outcomes).
+            if not handled and not raw.get("hasMedia"):
+                # Deferred media needs exact completion evidence: a newer
+                # assistant row may answer an unrelated message.
                 handled = self._db.message_source_key_has_response(
                     source_chat_id=source_chat_id,
                     source_message_id=source_message_id,

@@ -20,7 +20,7 @@
  *   node bridge.js --port 3000 --session <CHANNELS_HOME>/whatsapp/session
  */
 
-import { makeWASocket, useMultiFileAuthState, DisconnectReason } from '@whiskeysockets/baileys';
+import { makeWASocket, useMultiFileAuthState, DisconnectReason, generateMessageIDV2 } from '@whiskeysockets/baileys';
 import express from 'express';
 import { Boom } from '@hapi/boom';
 import pino from 'pino';
@@ -115,6 +115,9 @@ function sleep(ms) {
 
 function sendWithTimeout(chatId, payload, timeoutMs = SEND_TIMEOUT_MS) {
   if (!SOUL_ID) throw new Error('Select a Soul before sending');
+  const messageId = generateMessageIDV2(sock.user?.id);
+  // The send can succeed and echo after the HTTP timeout has already fired.
+  sentStore.trackSent(messageId);
   let timer;
   const timeoutPromise = new Promise((_, reject) => {
     timer = setTimeout(
@@ -122,7 +125,7 @@ function sendWithTimeout(chatId, payload, timeoutMs = SEND_TIMEOUT_MS) {
       timeoutMs,
     );
   });
-  const sending = sock.sendMessage(chatId, payload);
+  const sending = sock.sendMessage(chatId, payload, { messageId });
   socketWork.add(sending);
   const settled = () => socketWork.delete(sending);
   sending.then(settled, settled);
@@ -525,7 +528,6 @@ app.post('/send', trackRequest(async (req, res) => {
     const messageIds = [];
     for (let i = 0; i < chunks.length; i += 1) {
       const sent = await sendWithTimeout(chatId, { text: chunks[i] });
-      sentStore.trackSent(sent?.key?.id);
       sentStore.storeSent(sent, { conversation: chunks[i] });
       if (sent?.key?.id) messageIds.push(sent.key.id);
       if (chunks.length > 1 && i < chunks.length - 1) {
@@ -567,7 +569,6 @@ app.post('/edit', trackRequest(async (req, res) => {
     if (chunks.length > 1) {
       for (let i = 1; i < chunks.length; i += 1) {
         const sent = await sendWithTimeout(chatId, { text: chunks[i] });
-        sentStore.trackSent(sent?.key?.id);
         sentStore.storeSent(sent, { conversation: chunks[i] });
         if (sent?.key?.id) messageIds.push(sent.key.id);
         if (i < chunks.length - 1) {
@@ -676,13 +677,11 @@ app.post('/send-media', trackRequest(async (req, res) => {
       if (!labels.length) labels.push(formatOutgoingMessage(''));
       for (const text of labels) {
         const label = await sendWithTimeout(chatId, { text });
-        sentStore.trackSent(label?.key?.id);
         sentStore.storeSent(label, { conversation: text });
       }
     }
     const sent = await sendWithTimeout(chatId, msgPayload);
 
-    sentStore.trackSent(sent?.key?.id);
     sentStore.storeSent(
       sent,
       buildMediaRetryCachePayload(type, {

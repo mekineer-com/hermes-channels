@@ -282,11 +282,17 @@ for (const outcome of ['resolve', 'reject']) {
     let resolveSend, rejectSend, expire;
     const rawSend = new Promise((resolve, reject) => { resolveSend = resolve; rejectSend = reject; });
     const calls = [];
+    const sentIds = new Set();
+    let sendOptions;
     const context = {
       process, Promise, Set, SOUL_ID: 'Beacon', SEND_TIMEOUT_MS: 60_000,
       setTimeout: callback => { expire = callback; }, clearTimeout() {},
       logger: { error: (...args) => assert.fail(String(args)) },
-      sock: { sendMessage: () => rawSend, end: async () => { calls.push('socket-end'); } },
+      generateMessageIDV2: () => 'fictional-sent',
+      sentStore: { trackSent: id => sentIds.add(id), isEcho: id => sentIds.has(id) },
+      sock: { user: { id: '111@s.whatsapp.net' },
+        sendMessage: (_chat, _payload, options) => { sendOptions = options; return rawSend; },
+        end: async () => { calls.push('socket-end'); } },
       socketLifecycle: { stop: async () => {} },
     };
     runInNewContext(bridgeSource.slice(bridgeSource.indexOf('let server;'), bridgeSource.indexOf('async function startSocket()')) +
@@ -303,6 +309,18 @@ for (const outcome of ['resolve', 'reject']) {
     try {
       await new Promise(setImmediate);
       assert.deepEqual(calls, ['http-timeout']);
+      assert.equal(sendOptions?.messageId, 'fictional-sent');
+      assert.ok(sentIds.has(sendOptions.messageId));
+      const ingest = createMessageIngest({
+        durableQueue: { enqueue: () => assert.fail('Timed-out Soul audio must not become an owner event') },
+        identity: { learnAliasFromDm: () => null },
+        sentStore: context.sentStore, getSock: () => context.sock,
+        normalizeId: id => id, config: { syncHistoryWindowDays: 14 },
+      });
+      await ingest.enqueueHistoryMessages({ messages: [{
+        key: { remoteJid: '111@s.whatsapp.net', id: 'fictional-sent', fromMe: true },
+        message: { audioMessage: {} }, messageTimestamp: Math.floor(Date.now() / 1000),
+      }] });
     } finally {
       if (outcome === 'resolve') resolveSend({ key: { id: 'fictional-sent' } });
       else rejectSend(new Error('Fixture send failure'));

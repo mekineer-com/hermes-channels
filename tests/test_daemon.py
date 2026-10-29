@@ -1453,6 +1453,7 @@ def test_history_arrival_can_trigger_turn_once(tmp_path, monkeypatch, chat_id, c
         raw = history_event("hello", "hist-1").raw_message
         raw.update(
             chatId=chat_id, isGroup=chat_type == "group", fromMe=from_me,
+            senderId="111@s.whatsapp.net" if from_me else ("333@s.whatsapp.net" if chat_type == "group" else chat_id),
             speakerRoleHint="user", body="hello",
         )
         built = await daemon._build_message_event(raw)
@@ -1509,6 +1510,9 @@ def test_history_then_live_records_both_arrivals_and_turns_once(tmp_path, monkey
             assert memu.turn_calls == []
             assert daemon._db.message_source_key_exists(source_chat_id="123@lid", source_message_id="same-1")
             assert not daemon._db.message_source_key_is_processed(source_chat_id="123@lid", source_message_id="same-1")
+            entry = daemon.get_or_create_history_session(hist.source)
+            daemon._db.append_message(entry.session_id, "assistant", "Reply to another message")
+            assert daemon._db.message_source_key_has_response(source_chat_id="123@lid", source_message_id="same-1")
             assert daemon._history_event_can_trigger_turn(live)
         if record_arrivals:
             daemon._record_whatsapp_arrival_raw(live.raw_message)
