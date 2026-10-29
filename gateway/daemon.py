@@ -1679,7 +1679,7 @@ class ChannelsDaemon:
         raw = event.raw_message if isinstance(event.raw_message, dict) else {}
         if not self._whatsapp_source_key(raw):
             return False
-        if raw.get("fromMe") or str(raw.get("speakerRoleHint") or "").strip().lower() == "assistant":
+        if str(raw.get("speakerRoleHint") or "").strip().lower() == "assistant":
             return False
         if not str(event.text or "").strip() and not raw.get("hasMedia"):
             return False

@@ -105,7 +105,8 @@ Hermes:
   phone-originated `fromMe` messages through; bot echoes are filtered through
   sent-message echo tracking.
 - History may trigger a turn when it is the first new-enough arrival. That is a
-  July 2026 OpenAlma behavior, not old Hermes parity.
+  July 2026 OpenAlma behavior, not old Hermes parity. This includes human
+  account-owner messages: `fromMe` is ownership evidence, not a Soul-reply flag.
 - Pending WhatsApp follow-ups are newest-wins. One reply per busy chat is the
   intended behavior; background/web-source history is responsible for content
   recovery, not the live turn payload.

@@ -1439,27 +1439,44 @@ def test_replay_gateway_wal_redispatches_pending_and_marks_non_message_processed
     asyncio.run(run())
 
 
-def test_history_arrival_can_trigger_turn_once(tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    "chat_id,chat_type",
+    [("111@s.whatsapp.net", "dm"), ("222@s.whatsapp.net", "dm"), ("123-456@g.us", "group")],
+)
+@pytest.mark.parametrize("from_me", [False, True])
+def test_history_arrival_can_trigger_turn_once(tmp_path, monkeypatch, chat_id, chat_type, from_me):
     async def run():
         memu = FakeMemu()
         daemon = make_daemon(tmp_path, monkeypatch, memu)
         daemon.send = lambda *_args, **_kwargs: asyncio.sleep(0, result=SendResult(True, "sent-1"))
 
-        await daemon._dispatch_built_message_event(history_event("hello", "hist-1"))
+        raw = history_event("hello", "hist-1").raw_message
+        raw.update(
+            chatId=chat_id, isGroup=chat_type == "group", fromMe=from_me,
+            speakerRoleHint="user", body="hello",
+        )
+        built = await daemon._build_message_event(raw)
+        assert built is not None
+        await daemon._dispatch_built_message_event(built)
         await wait_for_turns(memu, 1)
 
         assert len(memu.turn_calls) == 1
         assert memu.turn_calls[0]["message"] == "hello"
+        assert memu.turn_calls[0]["chat_type"] == chat_type
+        assert memu.turn_calls[0]["source_owner_id"] == (daemon.owner_id if from_me else None)
         await wait_until(lambda: daemon._gateway_wal.processed_up_to == 1)
         assert daemon._gateway_wal.processed_up_to == 1
-        assert daemon._db.message_source_key_is_processed(source_chat_id="123@lid", source_message_id="hist-1")
+        assert daemon._db.message_source_key_is_processed(source_chat_id=chat_id, source_message_id="hist-1")
+        await daemon._dispatch_built_message_event(built)
+        assert len(memu.turn_calls) == 1
         await daemon.disconnect()
 
     asyncio.run(run())
 
 
 @pytest.mark.parametrize("delay,record_arrivals", [(0.01, True), (0.04, False)])
-def test_history_then_live_records_both_arrivals_and_turns_once(tmp_path, monkeypatch, delay, record_arrivals):
+@pytest.mark.parametrize("from_me", [False, True])
+def test_history_then_live_records_both_arrivals_and_turns_once(tmp_path, monkeypatch, delay, record_arrivals, from_me):
     async def run():
         memu = FakeMemu()
         daemon = make_daemon(tmp_path, monkeypatch, memu)
@@ -1470,6 +1487,7 @@ def test_history_then_live_records_both_arrivals_and_turns_once(tmp_path, monkey
         live = event("hello", "same-1")
         live.raw_message["timestamp"] = time.time()
         live.raw_message["wal_seq"] = 2
+        hist.raw_message["fromMe"] = live.raw_message["fromMe"] = from_me
         if record_arrivals:
             daemon._record_whatsapp_arrival_raw(hist.raw_message)
         await daemon._dispatch_built_message_event(hist)
@@ -1515,7 +1533,8 @@ def test_history_then_live_different_ids_do_not_duplicate_text(tmp_path, monkeyp
     asyncio.run(run())
 
 
-def test_live_then_history_records_both_arrivals_and_turns_once(tmp_path, monkeypatch):
+@pytest.mark.parametrize("from_me", [False, True])
+def test_live_then_history_records_both_arrivals_and_turns_once(tmp_path, monkeypatch, from_me):
     async def run():
         memu = FakeMemu()
         daemon = make_daemon(tmp_path, monkeypatch, memu)
@@ -1525,6 +1544,7 @@ def test_live_then_history_records_both_arrivals_and_turns_once(tmp_path, monkey
         live.raw_message["timestamp"] = time.time()
         live.raw_message["wal_seq"] = 1
         hist = history_event("hello", "same-2", wal_seq=2)
+        hist.raw_message["fromMe"] = live.raw_message["fromMe"] = from_me
         daemon._record_whatsapp_arrival_raw(live.raw_message)
         await daemon._dispatch_built_message_event(live)
         daemon._record_whatsapp_arrival_raw(hist.raw_message)
@@ -1542,18 +1562,17 @@ def test_live_then_history_records_both_arrivals_and_turns_once(tmp_path, monkey
     asyncio.run(run())
 
 
-def test_from_me_and_empty_history_record_arrival_without_turn(tmp_path, monkeypatch):
+@pytest.mark.parametrize("from_me", [False, True])
+def test_assistant_and_empty_history_record_arrival_without_turn(tmp_path, monkeypatch, from_me):
     async def run():
         memu = FakeMemu()
         daemon = make_daemon(tmp_path, monkeypatch, memu)
 
-        from_me = history_event("sent by me", "from-me", wal_seq=1)
-        from_me.raw_message["fromMe"] = True
-        assistant = history_event("soul said it", "assistant-row", wal_seq=2)
+        assistant = history_event("soul said it", "assistant-row", wal_seq=1)
         assistant.raw_message["speakerRoleHint"] = "assistant"
-        empty = history_event("", "empty", wal_seq=3)
-        daemon._record_whatsapp_arrival_raw(from_me.raw_message)
-        await daemon._dispatch_built_message_event(from_me)
+        assistant.raw_message["fromMe"] = from_me
+        empty = history_event("", "empty", wal_seq=2)
+        empty.raw_message["fromMe"] = from_me
         daemon._record_whatsapp_arrival_raw(assistant.raw_message)
         await daemon._dispatch_built_message_event(assistant)
         daemon._record_whatsapp_arrival_raw(empty.raw_message)
@@ -1562,7 +1581,6 @@ def test_from_me_and_empty_history_record_arrival_without_turn(tmp_path, monkeyp
             await daemon._dispatch_built_message_event(built)
 
         assert memu.turn_calls == []
-        assert daemon._db.get_whatsapp_arrival("123@lid", "from-me") is not None
         assert daemon._db.get_whatsapp_arrival("123@lid", "assistant-row") is not None
         assert daemon._db.get_whatsapp_arrival("123@lid", "empty") is not None
         await daemon.disconnect()
@@ -1570,12 +1588,14 @@ def test_from_me_and_empty_history_record_arrival_without_turn(tmp_path, monkeyp
     asyncio.run(run())
 
 
-def test_stale_history_records_without_turn(tmp_path, monkeypatch):
+@pytest.mark.parametrize("from_me", [False, True])
+def test_stale_history_records_without_turn(tmp_path, monkeypatch, from_me):
     async def run():
         memu = FakeMemu()
         daemon = make_daemon(tmp_path, monkeypatch, memu)
         daemon.send = lambda *_args, **_kwargs: asyncio.sleep(0, result=SendResult(True, "sent-1"))
         hist = history_event("old but recoverable", "old-history", wal_seq=1)
+        hist.raw_message["fromMe"] = from_me
         hist.raw_message["timestamp"] = time.time() - (daemon.settings.max_message_age_seconds + 100)
         daemon._record_whatsapp_arrival_raw(hist.raw_message)
 
@@ -1590,13 +1610,15 @@ def test_stale_history_records_without_turn(tmp_path, monkeypatch):
     asyncio.run(run())
 
 
-def test_history_before_active_since_records_arrival_without_turn(tmp_path, monkeypatch):
+@pytest.mark.parametrize("from_me", [False, True])
+def test_history_before_active_since_records_arrival_without_turn(tmp_path, monkeypatch, from_me):
     async def run():
         memu = FakeMemu()
         daemon = make_daemon(tmp_path, monkeypatch, memu)
         with sqlite3.connect(tmp_path / "state.db") as conn:
             conn.execute("INSERT INTO souls(soul_id, active_since) VALUES(?, ?)", ("soul", 1000.0))
         hist = history_event("too old", "before-active", wal_seq=1)
+        hist.raw_message["fromMe"] = from_me
         hist.raw_message["timestamp"] = 500
 
         daemon._record_whatsapp_arrival_raw(hist.raw_message)
