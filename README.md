@@ -30,9 +30,10 @@ WhatsApp ──► Baileys bridge (Node.js)  ──► gateway/daemon.py ──�
 
 Config file: `data/config.json` (created on first run). Override with environment variables:
 
-The daemon reads the canonical OpenAlma owner and exact soul list from
-`mcp-memu-server` before initializing Channels state. It does not maintain or
-create a separate identity; configure an existing soul before starting it.
+Configure an existing Soul while memU is available. Channels can then start and
+collect WhatsApp history even while memU is stopped. It validates the shared
+owner and Soul with memU before processing new turns or sending queued replies.
+Messages received offline stay in history, but do not trigger catch-up replies.
 
 | Env var | Default | Purpose |
 |---------|---------|---------|

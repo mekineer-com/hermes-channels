@@ -38,9 +38,11 @@ old Hermes framework. The intended shape is smaller:
   `whatsapp_known_contacts.py`: WhatsApp identity/contact evidence and display
   seams.
 - `gateway/memu_client.py`: HTTP client for memU turn calls and outbound queue
-  claim/mark operations. At startup it reads the canonical mcp-owned owner and
-  exact soul list; channel configuration selects existing identity and never
-  creates it.
+  claim/mark operations. Before Soul work it reads the canonical mcp-owned owner
+  and exact soul list; channel configuration never creates identity. Transport
+  startup is independent of memU. Offline arrivals remain in history and are
+  marked handled without error dialogue or catch-up replies; the existing outbound
+  poll reconnects when memU returns. No offline identity fallback is stored.
   A structured `soul_paused` refusal retains the incoming user row without
   sending a failure notice or saving assistant error dialogue. Recovery lives
   in the launcher's scoped failure/Retry meter, not WhatsApp dialogue.

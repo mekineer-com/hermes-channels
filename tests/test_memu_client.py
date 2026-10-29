@@ -1,8 +1,25 @@
 import json
+from urllib.error import HTTPError, URLError
 
 import pytest
 
-from gateway.memu_client import MemuClientError, MemuHttpClient, normalize_history_for_memu
+from gateway.memu_client import MemuClientError, MemuHttpClient, MemuUnavailableError, normalize_history_for_memu
+
+
+@pytest.mark.parametrize("error,unavailable", [
+    (URLError(ConnectionRefusedError("Connection refused")), True),
+    (URLError("Unclassified transport failure"), False),
+    (URLError(TimeoutError("Timed out")), False), (TimeoutError("Timed out"), False),
+    (HTTPError("http://memu.invalid", 503, "Unavailable", None, None), False),
+    (HTTPError("http://memu.invalid", 500, "Internal error", None, None), False),
+])
+def test_transport_unavailability_is_distinct_from_server_failure(monkeypatch, error, unavailable):
+    def offline(*_args, **_kwargs):
+        raise error
+    monkeypatch.setattr("gateway.memu_client.urllib.request.urlopen", offline)
+    with pytest.raises(MemuClientError) as caught:
+        MemuHttpClient(base_url="http://memu.invalid").read_owner()
+    assert isinstance(caught.value, MemuUnavailableError) is unavailable
 
 
 def test_read_owner_uses_mcp_owner(monkeypatch) -> None:

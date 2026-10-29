@@ -31,7 +31,7 @@ from gateway.channel_directory import write_channel_directory
 from gateway.config import DaemonSettings, load_config
 from gateway.contact_store import WhatsAppContactStore
 from gateway.home import channels_home
-from gateway.memu_client import MemuClientError, MemuHttpClient
+from gateway.memu_client import MemuClientError, MemuHttpClient, MemuUnavailableError
 from gateway.memu_policy import whatsapp_channel_settings
 from gateway.state_db import ChannelsStateDB
 from gateway.util import atomic_json_write
@@ -351,12 +351,9 @@ class ChannelsDaemon:
             base_url=self.settings.memu_base_url,
             timeout_seconds=self.settings.timeout_seconds,
         )
-        self.owner_id = self._memu_client.read_owner()
-        souls = self._memu_client.list_souls()
+        self.owner_id: str | None = None
         if not self.settings.soul_id:
             raise RuntimeError("Channels soul is not configured")
-        if self.settings.soul_id not in souls:
-            raise RuntimeError(f"Channels soul does not exist: {self.settings.soul_id}")
         self.home = channels_home()
         self.whatsapp_home = self.home / "whatsapp"
         self._bridge_port = self.settings.bridge_port
@@ -397,6 +394,15 @@ class ChannelsDaemon:
         self._sessions_loaded = False
         self._outbound_sent_path = self.whatsapp_home / "outbound_sent.json"
         self._outbound_sent_ids: set[str] | None = None
+
+    def _ensure_memu_identity(self) -> str:
+        owner_id = self.owner_id
+        if owner_id is None:
+            owner_id = self._memu_client.read_owner()
+            if self.settings.soul_id not in self._memu_client.list_souls():
+                raise RuntimeError(f"Channels soul does not exist: {self.settings.soul_id}")
+            self.owner_id = owner_id
+        return owner_id
 
     async def start(self) -> None:
         ok = await self.connect()
@@ -964,16 +970,17 @@ class ChannelsDaemon:
 
         history = [] if source.platform == "whatsapp" else self._db.get_messages(entry.session_id)
         try:
+            owner_id = await asyncio.to_thread(self._ensure_memu_identity)
             turn_out = await asyncio.to_thread(
                 self._memu_client.memu_turn,
                 conversation_id=conversation_id,
-                user_id=self.owner_id,
+                user_id=owner_id,
                 soul_id=self.settings.soul_id,
                 message=str(event.text or "").strip(),
                 history=history,
                 history_user_name=sender_name,
                 user_name=sender_name,
-                source_owner_id=self.owner_id if raw.get("fromMe") is True else None,
+                source_owner_id=owner_id if raw.get("fromMe") is True else None,
                 debug=False,
                 chat_name=source.chat_name,
                 chat_type=chat_type,
@@ -1008,6 +1015,10 @@ class ChannelsDaemon:
                 sender_id=f"soul:{self.settings.soul_id}", sender_name=self.settings.soul_id,
             )
             return response_text
+        except MemuUnavailableError:
+            self.owner_id = None
+            logger.debug("memU unavailable; input retained as history for %s", conversation_id)
+            return ""
         except MemuClientError as exc:
             if exc.code == "soul_paused":
                 logger.warning("Soul paused; source input retained for %s. Retry in launcher.", conversation_id)
@@ -1281,19 +1292,24 @@ class ChannelsDaemon:
             await asyncio.sleep(self.settings.drain_interval_seconds)
 
     async def drain_outbounds(self) -> int:
-        rows = await asyncio.to_thread(
-            self._memu_client.claim_whatsapp_outbounds,
-            user_id=self.owner_id,
-            soul_id=self.settings.soul_id,
-            claimed_by="channels",
-            limit=10,
-        )
+        try:
+            owner_id = await asyncio.to_thread(self._ensure_memu_identity)
+            rows = await asyncio.to_thread(
+                self._memu_client.claim_whatsapp_outbounds,
+                user_id=owner_id,
+                soul_id=self.settings.soul_id,
+                claimed_by="channels",
+                limit=10,
+            )
+        except MemuUnavailableError:
+            self.owner_id = None
+            return 0
         for row in rows:
             if isinstance(row, dict):
-                await self._deliver_outbound(row)
+                await self._deliver_outbound(row, owner_id)
         return len([row for row in rows if isinstance(row, dict)])
 
-    async def _deliver_outbound(self, row: dict[str, Any]) -> None:
+    async def _deliver_outbound(self, row: dict[str, Any], owner_id: str) -> None:
         out_id = str(row.get("id") or "").strip()
         target = str(row.get("target") or "").strip().lower()
         text = str(row.get("response_text") or "").strip()
@@ -1306,7 +1322,7 @@ class ChannelsDaemon:
             try:
                 await asyncio.to_thread(
                     self._memu_client.mark_whatsapp_outbound,
-                    user_id=self.owner_id,
+                    user_id=owner_id,
                     soul_id=self.settings.soul_id,
                     outbound_id=out_id,
                     status=status,

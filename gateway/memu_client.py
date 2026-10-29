@@ -122,6 +122,10 @@ def normalize_history_for_memu(
     return normalized
 
 
+class MemuUnavailableError(MemuClientError):
+    """Connection was refused before a request could reach memU."""
+
+
 class MemuHttpClient:
     """Thin HTTP client for mcp-memu-server integration endpoints."""
 
@@ -165,7 +169,8 @@ class MemuHttpClient:
                 response_body=body,
             ) from exc
         except urllib.error.URLError as exc:
-            raise MemuClientError(f"memU request failed: {exc}") from exc
+            error = MemuUnavailableError if isinstance(exc.reason, ConnectionRefusedError) else MemuClientError
+            raise error(f"memU request failed: {exc}") from exc
 
         if not raw:
             return {}

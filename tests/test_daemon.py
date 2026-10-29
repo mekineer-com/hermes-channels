@@ -19,7 +19,7 @@ from gateway.daemon import (
     SessionSource,
     build_session_key,
 )
-from gateway.memu_client import MemuClientError
+from gateway.memu_client import MemuClientError, MemuUnavailableError
 
 
 def settings() -> DaemonSettings:
@@ -72,15 +72,15 @@ def make_daemon(tmp_path, monkeypatch, memu=None):
     if not (tmp_path / "memu.json").exists():
         (tmp_path / "memu.json").write_text(json.dumps({"whatsapp": {"default_policy": "full"}}))
     daemon = ChannelsDaemon(settings(), memu_client=memu or FakeMemu())
+    daemon._ensure_memu_identity()
     daemon.send_typing = async_noop
     return daemon
 
 
-@pytest.mark.parametrize("soul_id", ["", "unknown", "Soul"])
-def test_daemon_rejects_unavailable_soul_before_creating_state(tmp_path, monkeypatch, soul_id):
+def test_daemon_requires_selected_soul_before_creating_state(tmp_path, monkeypatch):
     monkeypatch.setenv("CHANNELS_HOME", str(tmp_path))
     configured = settings()
-    configured.soul_id = soul_id
+    configured.soul_id = ""
 
     with pytest.raises(RuntimeError):
         ChannelsDaemon(configured, memu_client=FakeMemu())
@@ -88,17 +88,35 @@ def test_daemon_rejects_unavailable_soul_before_creating_state(tmp_path, monkeyp
     assert not (tmp_path / "state.db").exists()
 
 
-def test_daemon_rejects_missing_owner_before_creating_state(tmp_path, monkeypatch):
+@pytest.mark.parametrize("soul_id", ["unknown", "Soul"])
+def test_daemon_validates_shared_soul_before_memu_work(tmp_path, monkeypatch, soul_id):
+    monkeypatch.setenv("CHANNELS_HOME", str(tmp_path))
+    configured = settings()
+    configured.soul_id = soul_id
+    memu = FakeMemu()
+    daemon = ChannelsDaemon(configured, memu_client=memu)
+    try:
+        with pytest.raises(RuntimeError, match="soul does not exist"):
+            daemon._ensure_memu_identity()
+        assert daemon.owner_id is None and memu.turn_calls == []
+    finally:
+        asyncio.run(daemon.disconnect())
+
+
+def test_daemon_validates_shared_owner_before_memu_work(tmp_path, monkeypatch):
     class MissingOwner(FakeMemu):
         def read_owner(self):
             raise MemuClientError("OpenAlma owner has not been created")
 
     monkeypatch.setenv("CHANNELS_HOME", str(tmp_path))
 
-    with pytest.raises(MemuClientError, match="owner has not been created"):
-        ChannelsDaemon(settings(), memu_client=MissingOwner())
-
-    assert not (tmp_path / "state.db").exists()
+    daemon = ChannelsDaemon(settings(), memu_client=MissingOwner())
+    try:
+        with pytest.raises(MemuClientError, match="owner has not been created"):
+            daemon._ensure_memu_identity()
+        assert daemon.owner_id is None
+    finally:
+        asyncio.run(daemon.disconnect())
 
 
 async def async_noop(*_args, **_kwargs):
@@ -179,6 +197,84 @@ async def wait_until(predicate, *, timeout=1.0):
             return
         await asyncio.sleep(0.005)
     assert predicate()
+
+
+def test_offline_start_retains_history_without_replaying_turns(tmp_path, monkeypatch):
+    class SwitchingMemu(FakeMemu):
+        offline = True
+        owner_reads = 0
+
+        def read_owner(self):
+            self.owner_reads += 1
+            if self.offline:
+                raise MemuUnavailableError("Server stopped")
+            return super().read_owner()
+
+        def memu_turn(self, **kwargs):
+            if self.offline:
+                raise MemuUnavailableError("Server stopped")
+            return super().memu_turn(**kwargs)
+
+        def claim_whatsapp_outbounds(self, **kwargs):
+            if self.offline:
+                raise MemuUnavailableError("Server stopped")
+            return super().claim_whatsapp_outbounds(**kwargs)
+
+    async def run():
+        monkeypatch.setenv("CHANNELS_HOME", str(tmp_path))
+        (tmp_path / "memu.json").write_text(json.dumps({"whatsapp": {"default_policy": "full"}}))
+        memu = SwitchingMemu()
+        daemon = ChannelsDaemon(settings(), memu_client=memu)
+        assert memu.owner_reads == 0 and daemon.owner_id is None
+        daemon.connect = lambda: async_value(True)
+        daemon.send_typing = async_noop
+        sent = []
+        async def send(chat, text, **_kwargs):
+            sent.append(text)
+            return SendResult(True, "sent-1")
+        daemon.send = send
+        daemon._route_whatsapp_notice_to_self_dm = lambda *_args: pytest.fail("Offline is not an error conversation")
+        await daemon.start()
+
+        async def receive(text, message_id, seq):
+            incoming = event(text, message_id)
+            incoming.raw_message.update(timestamp=time.time(), wal_seq=seq, fromMe=True)
+            await daemon._dispatch_built_message_event(incoming)
+            await wait_until(lambda: daemon._db.message_source_key_is_processed(
+                source_chat_id="123@lid", source_message_id=message_id))
+
+        try:
+            await receive("While offline", "offline-1", 1)
+            entry = next(iter(daemon._session_entries.values()))
+            assert [r["content"] for r in daemon._db.get_messages(entry.session_id)] == ["While offline"]
+            assert memu.turn_calls == [] and sent == []
+            assert await daemon.drain_outbounds() == 0
+
+            memu.offline = False
+            await daemon.drain_outbounds()
+            assert daemon.owner_id == "Fictional Owner"
+            await daemon._dispatch_built_message_event(history_event("While offline", "offline-1", wal_seq=2))
+            assert memu.turn_calls == []
+            await receive("Fresh online message", "online-1", 3)
+            assert len(memu.turn_calls) == 1 and sent == ["pong"]
+            assert memu.turn_calls[0]["source_owner_id"] == "Fictional Owner"
+
+            memu.offline = True
+            await receive("Offline again", "offline-2", 4)
+            assert daemon.owner_id is None
+            memu.offline = False
+            await daemon.drain_outbounds()
+            assert len(memu.turn_calls) == 1 and sent == ["pong"]
+            memu.offline = True
+            assert await daemon.drain_outbounds() == 0
+            assert daemon.owner_id is None
+            rows = daemon._db.get_messages(entry.session_id)
+            assert sum(r["role"] == "assistant" for r in rows) == 1
+            assert any(r["content"] == "Offline again" for r in rows)
+        finally:
+            await daemon.disconnect()
+
+    asyncio.run(run())
 
 
 @pytest.mark.parametrize("from_me", [False, True])
@@ -689,6 +785,7 @@ def test_outbound_drain_claims_as_channels_and_marks_sent(tmp_path, monkeypatch)
 
         async def send(chat_id, text, **_kwargs):
             sent.append(("text", chat_id, text))
+            daemon.owner_id = None  # An unrelated incoming request can discover an outage.
             return SendResult(True, "sent-text")
 
         async def send_document(chat_id, path, caption=None):
@@ -700,6 +797,7 @@ def test_outbound_drain_claims_as_channels_and_marks_sent(tmp_path, monkeypatch)
         assert await daemon.drain_outbounds() == 2
         assert memu.claim_calls[0]["claimed_by"] == "channels"
         assert [call["status"] for call in memu.mark_calls] == ["sent", "sent"]
+        assert all(call["user_id"] == "Fictional Owner" for call in memu.mark_calls)
         assert [call["claimed_at"] for call in memu.mark_calls] == [row["claimed_at"] for row in memu.rows]
         assert sent[0] == ("text", "123@lid", "hello")
         assert sent[1] == ("media", "123@lid", str(media), None)
@@ -1188,12 +1286,13 @@ def test_paused_soul_keeps_user_input_without_error_dialogue(tmp_path, monkeypat
     asyncio.run(run())
 
 
-def test_memu_exception_notifies_self_dm_and_persists_error_rows(tmp_path, monkeypatch):
+@pytest.mark.parametrize("status_code", [None, 500, 503])
+def test_memu_exception_notifies_self_dm_and_persists_error_rows(tmp_path, monkeypatch, status_code):
     async def run():
         class FailingMemu(FakeMemu):
             def memu_turn(self, **kwargs):
                 self.turn_calls.append(kwargs)
-                raise MemuClientError("boom", status_code=500)
+                raise MemuClientError("request timed out" if status_code is None else "boom", status_code=status_code)
 
         daemon = make_daemon(tmp_path, monkeypatch, FailingMemu())
         routed = []
