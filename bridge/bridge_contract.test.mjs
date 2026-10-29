@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { runInNewContext } from 'node:vm';
+import { spawnSync } from 'node:child_process';
 import { DurableQueue } from './durable_queue.js';
 import { createMessageIngest } from './message_ingest.js';
 
@@ -128,6 +129,22 @@ test('selected Soul alone defines the prefix; pair-only cannot send without one'
   assert.throws(() => runInNewContext(declaration, {...context, PAIR_ONLY: false}), /selected Soul/);
 });
 
+test('bridge exits after drained shutdown despite third-party idle timers', () => {
+  const shutdownSource = bridgeSource.slice(bridgeSource.indexOf('let server;'), bridgeSource.indexOf('async function startSocket()'));
+  const child = spawnSync(process.execPath, ['--input-type=module', '-e', `
+    import { runInNewContext } from 'node:vm';
+    const context = { process, Promise, Set, setTimeout, clearTimeout,
+      logger: { error() {} }, socketLifecycle: { stop: async () => {} },
+      sock: { end: async () => {} } };
+    for (const ms of [20000, 30000, 60000]) setTimeout(() => {}, ms);
+    await runInNewContext(${JSON.stringify(shutdownSource + '\nshutdown();')}, context);
+    console.log('drained');
+  `], { timeout: 5000, killSignal: 'SIGKILL', encoding: 'utf8' });
+  assert.equal(child.error, undefined, child.error?.message);
+  assert.equal(child.status, 0, child.stderr);
+  assert.match(child.stdout, /drained/);
+});
+
 test('bridge EOF preserves inbound messages during Stop and socket teardown', async t => {
   const { EventEmitter } = await import('node:events');
   const process = new EventEmitter();
@@ -135,6 +152,9 @@ test('bridge EOF preserves inbound messages during Stop and socket teardown', as
   process.stdin.resume = () => {};
   process.stdin.pause = () => {};
   process.env = { CHANNELS_MANAGED_STDIN: '1' };
+  const exitCodes = [];
+  process.exit = code => exitCodes.push(code);
+  let exitTimer;
   const events = new EventEmitter();
   const queueDir = mkdtempSync(join(tmpdir(), 'channels-stop-'));
   t.after(() => rmSync(queueDir, { recursive: true, force: true }));
@@ -154,6 +174,7 @@ test('bridge EOF preserves inbound messages during Stop and socket teardown', as
   const calls = [];
   const context = {
     process, Promise, Set, clearTimeout, logger: { error: (...args) => assert.fail(String(args)) },
+    setTimeout: (callback, ms) => { exitTimer = { callback, ms, unref() {} }; return exitTimer; },
     sock: {
       user: { id: '111:1@s.whatsapp.net', name: 'Fixture Human' },
       ev: events,
@@ -215,6 +236,16 @@ test('bridge EOF preserves inbound messages during Stop and socket teardown', as
   assert.deepEqual(queue.readUnacked(10).map(row => row.messageId), ['during-stop']);
   releaseClosing();
   await stopping;
+  assert.equal(exitTimer.ms, 2000);
+  let releaseAfterDrain;
+  currentWrite = new Promise(resolve => { releaseAfterDrain = resolve; });
+  events.emit('creds.update');
+  const exiting = exitTimer.callback();
+  await new Promise(setImmediate);
+  assert.deepEqual(exitCodes, []);
+  releaseAfterDrain();
+  await exiting;
+  assert.deepEqual(exitCodes, [0]);
   const reopened = new DurableQueue({ queueDir });
   assert.deepEqual(reopened.readUnacked(10).map(row => [row.messageId, row.body, row.deliveryMode]), [
     ['during-stop', 'during-stop', 'live'], ['during-end', 'during-end', 'persist_only'],
@@ -228,8 +259,11 @@ test('bridge records synchronous socket handler failures during Stop', async () 
   process.stdin = { pause() {} };
   const events = new EventEmitter();
   const errors = [];
+  let exitCallback;
+  process.exit = code => assert.equal(code, 1);
   const context = {
     process, Promise, Set, clearTimeout, logger: { error: (...args) => errors.push(args) },
+    setTimeout: callback => { exitCallback = callback; return { unref() {} }; },
     sock: { ev: events, end: async () => {} }, socketLifecycle: { stop: async () => {} },
   };
   runInNewContext(bridgeSource.slice(bridgeSource.indexOf('let server;'), bridgeSource.indexOf('async function startSocket()')) +
@@ -243,6 +277,7 @@ test('bridge records synchronous socket handler failures during Stop', async () 
   assert.equal(errors[0][0].err, failure);
   assert.equal(errors[0][1], 'socket handler failed');
   assert.equal(process.exitCode, 1);
+  await exitCallback();
 });
 
 test('bridge ignores connection lifecycle actions during Stop', () => {
@@ -286,7 +321,7 @@ for (const outcome of ['resolve', 'reject']) {
     let sendOptions;
     const context = {
       process, Promise, Set, SOUL_ID: 'Beacon', SEND_TIMEOUT_MS: 60_000,
-      setTimeout: callback => { expire = callback; }, clearTimeout() {},
+      setTimeout: callback => { expire = callback; return { unref() {} }; }, clearTimeout() {},
       logger: { error: (...args) => assert.fail(String(args)) },
       generateMessageIDV2: () => 'fictional-sent',
       sentStore: { trackSent: id => sentIds.add(id), isEcho: id => sentIds.has(id) },

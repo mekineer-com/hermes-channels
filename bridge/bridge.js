@@ -316,6 +316,13 @@ function shutdown() {
     await sock?.end(undefined);
     while (socketWork.size) await Promise.allSettled([...socketWork]);
     process.stdin.pause();
+    // Finish late admitted work, then retire the library's idle timers.
+    setTimeout(async () => {
+      while (httpWork.size || socketWork.size) {
+        await Promise.allSettled([...httpWork, ...socketWork]);
+      }
+      process.exit(process.exitCode ?? 0);
+    }, 2000).unref();
   })();
   shutdownPromise.catch((error) => {
     logger.error({ err: error }, 'bridge shutdown failed');
