@@ -1681,6 +1681,9 @@ class ChannelsDaemon:
             return False
         if str(raw.get("speakerRoleHint") or "").strip().lower() == "assistant":
             return False
+        # History placeholders must not consume the later downloaded media copy.
+        if raw.get("hasMedia") and not event.media_urls:
+            return False
         if not str(event.text or "").strip() and not raw.get("hasMedia"):
             return False
         message_timestamp = _coerce_gateway_timestamp(raw.get("timestamp"))

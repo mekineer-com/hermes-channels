@@ -1476,7 +1476,8 @@ def test_history_arrival_can_trigger_turn_once(tmp_path, monkeypatch, chat_id, c
 
 @pytest.mark.parametrize("delay,record_arrivals", [(0.01, True), (0.04, False)])
 @pytest.mark.parametrize("from_me", [False, True])
-def test_history_then_live_records_both_arrivals_and_turns_once(tmp_path, monkeypatch, delay, record_arrivals, from_me):
+@pytest.mark.parametrize("document", [False, True])
+def test_history_then_live_records_both_arrivals_and_turns_once(tmp_path, monkeypatch, delay, record_arrivals, from_me, document):
     async def run():
         memu = FakeMemu()
         daemon = make_daemon(tmp_path, monkeypatch, memu)
@@ -1488,16 +1489,35 @@ def test_history_then_live_records_both_arrivals_and_turns_once(tmp_path, monkey
         live.raw_message["timestamp"] = time.time()
         live.raw_message["wal_seq"] = 2
         hist.raw_message["fromMe"] = live.raw_message["fromMe"] = from_me
+        expected = "hello"
+        if document:
+            path = tmp_path / "payload.txt"
+            path.write_text("Fictional document text: MAPLE.")
+            for incoming in (hist, live):
+                incoming.raw_message.update(body="[document received]", hasMedia=True,
+                                            mediaType="document", mediaUrls=[])
+            hist = await daemon._build_message_event(hist.raw_message)
+            live.raw_message["mediaUrls"] = [str(path)]
+            live = await daemon._build_message_event(live.raw_message)
+            expected = live.text
+            assert "MAPLE" in expected
         if record_arrivals:
             daemon._record_whatsapp_arrival_raw(hist.raw_message)
         await daemon._dispatch_built_message_event(hist)
+        if document:
+            await wait_until(lambda: daemon._gateway_wal.processed_up_to == 1)
+            assert memu.turn_calls == []
+            assert daemon._db.message_source_key_exists(source_chat_id="123@lid", source_message_id="same-1")
+            assert not daemon._db.message_source_key_is_processed(source_chat_id="123@lid", source_message_id="same-1")
+            assert daemon._history_event_can_trigger_turn(live)
         if record_arrivals:
             daemon._record_whatsapp_arrival_raw(live.raw_message)
         await daemon._dispatch_built_message_event(live)
         await wait_for_turns(memu, 1)
 
         assert len(memu.turn_calls) == 1
-        assert memu.turn_calls[0]["message"] == "hello"
+        assert memu.turn_calls[0]["message"] == expected
+        assert memu.turn_calls[0]["source_owner_id"] == (daemon.owner_id if from_me else None)
         await wait_until(lambda: daemon._gateway_wal.processed_up_to == 2)
         assert daemon._gateway_wal.processed_up_to == 2
         if record_arrivals:
