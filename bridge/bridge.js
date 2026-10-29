@@ -313,6 +313,7 @@ function shutdown() {
     await httpClosed;
     await Promise.allSettled([...httpWork]);
     while (socketWork.size) await Promise.allSettled([...socketWork]);
+    // The pinned Baileys patch leaves background resend timers unreferenced.
     await sock?.end(undefined);
     while (socketWork.size) await Promise.allSettled([...socketWork]);
     process.stdin.pause();

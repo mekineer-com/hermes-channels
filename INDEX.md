@@ -21,6 +21,8 @@ old Hermes framework. The intended shape is smaller:
 - `bridge/`: Baileys live-message bridge. Durable queue, message ingest,
   history ingest, known contacts/chats, sent-message echo tracking, media retry.
   Baileys is pinned to an exact reviewed release in `bridge/package.json`.
+  Its install-time patch unrefs placeholder resend/cleanup timers and skips
+  resending on a closed socket; do not replace graceful drain with process exit.
   This should remain copy-equivalent to final working `hermes-agent` bridge code
   unless a Channels-specific path/config seam requires a small delta.
 - `web-source/`: whatsapp-web.js history/source daemon. Captures reconciled

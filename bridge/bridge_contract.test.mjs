@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { runInNewContext } from 'node:vm';
+import { spawnSync } from 'node:child_process';
 import { DurableQueue } from './durable_queue.js';
 import { createMessageIngest } from './message_ingest.js';
 
@@ -12,6 +13,58 @@ const here = dirname(fileURLToPath(import.meta.url));
 const bridgeSource = readFileSync(join(here, 'bridge.js'), 'utf8');
 const messageIngestSource = readFileSync(join(here, 'message_ingest.js'), 'utf8');
 const socketLifecycleSource = readFileSync(join(here, 'socket_lifecycle.js'), 'utf8');
+const receiveSource = readFileSync(join(here, 'node_modules/@whiskeysockets/baileys/lib/Socket/messages-recv.js'), 'utf8');
+const placeholderResendSource = receiveSource.slice(
+  receiveSource.indexOf('    const requestPlaceholderResend ='), receiveSource.indexOf('    const handleCall ='),
+);
+
+function placeholderResendFixture(setTimeout) {
+  const cache = new Map();
+  cache.del = cache.delete.bind(cache);
+  const sent = [];
+  return {
+    authState: { creds: { me: { id: 'fictional-owner' } } }, placeholderResendCache: cache,
+    ws: { isOpen: true }, logger: { debug() {} }, setTimeout,
+    delay: ms => new Promise(resolve => setTimeout(resolve, ms)),
+    proto: { Message: { PeerDataOperationRequestType: { PLACEHOLDER_MESSAGE_RESEND: 0 } } },
+    sendPeerDataOperationMessage: async message => { sent.push(message); }, sent,
+  };
+}
+
+test('Baileys placeholder retry does not hold a closed connection process open', () => {
+  const child = spawnSync(process.execPath, ['--input-type=module', '-e', `
+    import { runInNewContext } from 'node:vm';
+    const fixture = (${placeholderResendFixture.toString()})(setTimeout);
+    runInNewContext(${JSON.stringify(placeholderResendSource + '\nrequestPlaceholderResend({id:"fictional-placeholder"});')}, fixture);
+    fixture.ws.isOpen = false;
+  `], { timeout: 2000, encoding: 'utf8' });
+  assert.equal(child.error, undefined, child.error?.message);
+  assert.equal(child.status, 0, child.stderr);
+});
+
+for (const closeBeforeResend of [false, true]) {
+  test(`Baileys placeholder retry keeps background timers unreferenced; closed=${closeBeforeResend}`, async () => {
+    const timers = [];
+    const fixture = placeholderResendFixture((callback, ms) => {
+      const timer = { callback, ms, referenced: true, unref() { this.referenced = false; return this; } };
+      timers.push(timer);
+      return timer;
+    });
+    runInNewContext(placeholderResendSource + '\nglobalThis.resend = requestPlaceholderResend;', fixture);
+    const pending = fixture.resend({ id: 'fictional-placeholder' });
+    assert.equal(timers[0].referenced, false);
+    fixture.ws.isOpen = !closeBeforeResend;
+    timers[0].callback();
+    await pending;
+    assert.equal(fixture.sent.length, closeBeforeResend ? 0 : 1);
+    assert.deepEqual(timers.map(t => t.ms), closeBeforeResend ? [5000] : [5000, 15000]);
+    assert.ok(timers.every(t => !t.referenced));
+    if (!closeBeforeResend) {
+      timers[1].callback();
+      assert.equal(fixture.placeholderResendCache.size, 0);
+    }
+  });
+}
 
 test('bridge preserves persist-only WhatsApp event field contract', () => {
   assert.match(messageIngestSource, /event\.eventType\s*=\s*'history_message'/);
