@@ -109,7 +109,10 @@ Hermes:
   another reply; that trade-off is accepted to keep one rule for text and media.
 - Do not add a blanket bot-mode `fromMe` drop. Final working Hermes allows
   phone-originated `fromMe` messages through; bot echoes are filtered through
-  sent-message echo tracking.
+  sent-message echo tracking. The bridge picks and tracks each message ID before
+  sending, so a send that succeeds after the HTTP timeout is still an echo.
+- Media history without downloaded media is stored but cannot trigger a turn;
+  the live copy (with the file) answers instead.
 - History may trigger a turn when it is the first new-enough arrival. That is a
   July 2026 OpenAlma behavior, not old Hermes parity. This includes human
   account-owner messages: `fromMe` is ownership evidence, not a Soul-reply flag.
