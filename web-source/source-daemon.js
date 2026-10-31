@@ -153,7 +153,7 @@ async function main() {
         const session = await browser.target().createCDPSession();
         // browser.close() has a Puppeteer forced-kill fallback; use its existing CDP channel.
         await session.send('Browser.close', {}, { timeout: 0 }).catch(error => {
-          console.warn('browser close response:', error.message);
+          console.warn(new Date().toISOString(), 'browser close response:', error.message);
         });
         await browserClosed;
         await browser.disconnect();
@@ -193,7 +193,7 @@ async function main() {
     const row = normalizeMessage(message, source);
     const result = await store.command('upsert_message', { row });
     await contacts.persistForMessageRow(row, Boolean(options.enrichContacts)).catch((error) => {
-      console.warn(`contact persist for ${row.msg_key} failed:`, error.message);
+      console.warn(new Date().toISOString(), `contact persist for ${row.msg_key} failed:`, error.message);
     });
     status.write({
       state: 'ready',
@@ -258,7 +258,7 @@ async function main() {
       try {
         await configureResourceBlocking(client.pupPage);
       } catch (error) {
-        console.warn('resource blocking not enabled:', error.message);
+        console.warn(new Date().toISOString(), 'resource blocking not enabled:', error.message);
       }
     }
     try {
@@ -268,7 +268,7 @@ async function main() {
       }
       await installRemoveMessageHook(client.pupPage);
     } catch (error) {
-      console.warn('message remove hook not enabled:', error.message);
+      console.warn(new Date().toISOString(), 'message remove hook not enabled:', error.message);
       status.write({
         last_remove_hook_error: error.message,
         last_remove_hook_error_at: Math.floor(Date.now() / 1000),

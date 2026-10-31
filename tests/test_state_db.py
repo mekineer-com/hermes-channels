@@ -43,6 +43,14 @@ def test_append_message_duplicate_source_key_returns_existing_id(tmp_path):
     rows = db.get_messages("s1")
     assert len(rows) == 1
     assert rows[0]["content"] == "hello"
+    original = rows[0]
+    db.update_message_content_by_source_key(source_chat_id="missing@lid", source_message_id="missing", content="ignored")
+    assert db.get_messages("s1") == [original]
+    assert db._conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0] == 1
+    db.update_message_content_by_source_key(source_chat_id="chat@lid", source_message_id="m1", content="full document")
+    assert db.get_messages("s1") == [{**original, "content": "full document"}]
+    assert db._conn.execute("SELECT id FROM messages").fetchone()[0] == first_id
+    assert db._conn.execute("SELECT message_count FROM sessions WHERE id='s1'").fetchone()[0] == 1
     db.close()
 
 

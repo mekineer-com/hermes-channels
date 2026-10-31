@@ -29,10 +29,10 @@ Defaults:
 
 `CHANNELS_HOME` defaults to the repo's `data/` directory.
 
-Backfill one bounded chat window:
+Backfill one bounded chat window (replace `CHAT_ID` with your chat's identifier):
 
 ```sh
-node source-daemon.js --backfill-chat 16467326349@c.us --backfill-limit 100 --exit-after-backfill
+node source-daemon.js --backfill-chat 'CHAT_ID@c.us' --backfill-limit 100 --exit-after-backfill
 ```
 
 Skip the contact/name snapshot for debugging:

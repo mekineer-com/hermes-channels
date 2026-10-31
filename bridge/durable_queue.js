@@ -178,6 +178,8 @@ export class DurableQueue {
     this.ackSinceCompaction = 0;
 
     this._load();
+    // A gateway may still hold a copy of a restored row from before restart.
+    this.readUpToSeq = Math.max(this.maxSeq, this.ackedUpToSeq);
   }
 
   _load() {
@@ -309,7 +311,8 @@ export class DurableQueue {
     if (hasValue(event.timestamp)) event.timestamp = normalizeTimestamp(event.timestamp);
     const incomingSeenMode = seenModeFor(event);
     if (incomingSeenMode === 'persist_only_media' && this.seenModeByUid.has(`revoke:${eventUid}`)) return null;
-    const existing = this.unacked.find((row) => row?.event_uid === eventUid);
+    const matching = this.unacked.filter((row) => row?.event_uid === eventUid);
+    const existing = matching.find((row) => row.seq > this.readUpToSeq);
     if (existing) {
       mergeQueuedEvent(existing, event);
       const mergedMode = seenModeFor(existing);
@@ -324,6 +327,7 @@ export class DurableQueue {
     if (seenMode && !canUpgradeSeenMode(seenMode, incomingSeenMode)) {
       return null;
     }
+    if (matching.length) event = mergeQueuedEvent({ ...matching[matching.length - 1] }, event);
     const seenTimestamp = this.seenTimestampByUid.get(eventUid);
     if (seenMode && hasValue(seenTimestamp)) {
       event.timestamp = seenTimestamp;
@@ -333,9 +337,9 @@ export class DurableQueue {
     this.nextSeq += 1;
     if (seq > this.maxSeq) this.maxSeq = seq;
     const row = {
+      ...event,
       seq,
       event_uid: eventUid,
-      ...event,
     };
     this._appendRow(row);
     this._appendSeenUid(eventUid, incomingSeenMode, row.timestamp);
@@ -348,7 +352,9 @@ export class DurableQueue {
   readUnacked(limit) {
     const n = parsePositiveInt(limit, this.defaultLimit);
     this.unacked = this.unacked.filter((row) => Number.isInteger(Number(row?.seq)) && Number(row.seq) >= 1);
-    return this.unacked.slice(0, n);
+    const rows = this.unacked.slice(0, n);
+    for (const row of rows) this.readUpToSeq = Math.max(this.readUpToSeq, row.seq);
+    return rows;
   }
 
   ackThrough(upToSeq) {

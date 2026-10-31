@@ -471,3 +471,47 @@ test('reload repairs seen metadata after payload commits but seen persistence fa
     rmSync(queueDir, { recursive: true, force: true });
   }
 });
+
+for (const live of [false, true]) {
+  for (const restart of [false, true]) {
+    test(`a handed-out history snapshot cannot ACK away an upgrade, live=${live}, restart=${restart}`, () => {
+      const queueDir = mkQueueDir();
+      try {
+        let queue = new DurableQueue({ queueDir, compactionEveryAcks: 1 });
+        const base = { chatId: 'fictional@g.us', messageId: 'media-1', deliveryMode: 'persist_only',
+          hasMedia: true, mediaType: 'document', timestamp: 1000, mediaUrls: [] };
+        queue.enqueue(base);
+        const held = JSON.parse(JSON.stringify(queue.readUnacked(100)));
+        if (restart) queue = new DurableQueue({ queueDir, compactionEveryAcks: 1 });
+        const upgraded = queue.enqueue({ ...base, deliveryMode: live ? 'live' : 'persist_only',
+          timestamp: 2000, mediaUrls: ['/fictional/document.txt'] });
+        assert.ok(upgraded.seq > held[0].seq);
+        assert.deepEqual(held[0].mediaUrls, []);
+        queue.ackThrough(held[0].seq);
+        const remaining = queue.readUnacked(100);
+        assert.equal(remaining.length, 1);
+        assert.deepEqual(remaining[0].mediaUrls, ['/fictional/document.txt']);
+        assert.equal(remaining[0].timestamp, 1000);
+      } finally {
+        rmSync(queueDir, { recursive: true, force: true });
+      }
+    });
+  }
+}
+
+test('an appended live upgrade preserves the handed-out history attachment', () => {
+  const queueDir = mkQueueDir();
+  try {
+    const queue = new DurableQueue({ queueDir });
+    const base = { chatId: 'fictional@g.us', messageId: 'media-1', deliveryMode: 'persist_only',
+      hasMedia: true, mediaType: 'document', timestamp: 1000, mediaUrls: ['/fictional/document.txt'] };
+    queue.enqueue(base);
+    const held = JSON.parse(JSON.stringify(queue.readUnacked(100)));
+    const live = queue.enqueue({ ...base, deliveryMode: 'live', mediaUrls: [], timestamp: 2000 });
+    assert.ok(live.seq > held[0].seq);
+    assert.deepEqual(live.mediaUrls, ['/fictional/document.txt']);
+    assert.equal(held[0].deliveryMode, 'persist_only');
+  } finally {
+    rmSync(queueDir, { recursive: true, force: true });
+  }
+});

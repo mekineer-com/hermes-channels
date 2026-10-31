@@ -114,7 +114,12 @@ Hermes:
 - Media history without downloaded media is stored but cannot trigger a turn.
   A later copy with the file may trigger, even if it is also history. The queue
   retains completeness across ACK/restart in internal seen metadata; external
-  `deliveryMode` and original source time remain unchanged.
+  `deliveryMode` and original source time remain unchanged. Handed-out rows are
+  immutable; upgrades use new sequences so old ACKs cannot delete them.
+  Successfully extracted document text enriches the original stored row, even
+  when too old to trigger a turn. Only supported text-like files up to 100 KB
+  inject file contents; images, voice, video and PDFs supply captions/placeholders,
+  not decoded media contents. This does not add media understanding.
 - History may trigger a turn when it is the first new-enough arrival. That is a
   July 2026 OpenAlma behavior, not old Hermes parity. This includes human
   account-owner messages: `fromMe` is ownership evidence, not a Soul-reply flag.

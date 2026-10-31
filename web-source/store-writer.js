@@ -51,7 +51,7 @@ class StoreWriter {
     try {
       response = JSON.parse(line);
     } catch (error) {
-      console.error('invalid store response', line);
+      console.error(new Date().toISOString(), 'invalid store response', line);
       return;
     }
     const id = response.request_id;

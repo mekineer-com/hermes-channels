@@ -1687,8 +1687,51 @@ def test_history_then_live_records_both_arrivals_and_turns_once(tmp_path, monkey
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("complete_mode", ["persist_only", "live"])
+@pytest.mark.parametrize("age", [0, 700])
+def test_completed_document_enriches_saved_source_without_changing_other_rows(tmp_path, monkeypatch, complete_mode, age):
+    async def run():
+        memu = FakeMemu()
+        daemon = make_daemon(tmp_path, monkeypatch, memu)
+        daemon.send = lambda *_args, **_kwargs: asyncio.sleep(0, result=SendResult(True, "sent-1"))
+        document = tmp_path / "fictional.txt"
+        document.write_text("fictional document contents")
+        raw = {"chatId": "fictional@g.us", "messageId": "attachment-1", "senderId": "first@lid",
+               "senderName": "Fictional First", "isGroup": True, "body": "caption", "hasMedia": True,
+               "mediaType": "document", "mediaUrls": [], "timestamp": time.time() - age,
+               "deliveryMode": "persist_only", "wal_seq": 1}
+        try:
+            await daemon._dispatch_built_message_event(await daemon._build_message_event(raw))
+            original = dict(daemon._db._conn.execute(
+                "SELECT * FROM messages WHERE source_message_id='attachment-1'").fetchone())
+            later_id = daemon._db.append_message(original["session_id"], "user", "fictional later message",
+                sender_id="later@lid", sender_name="Fictional Later", source_chat_id=raw["chatId"],
+                source_message_id="later-1", timestamp=raw["timestamp"] + 1)
+            later = dict(daemon._db._conn.execute("SELECT * FROM messages WHERE id=?", (later_id,)).fetchone())
+            complete = await daemon._build_message_event({**raw, "mediaUrls": [str(document)],
+                "deliveryMode": complete_mode, "wal_seq": 2})
+            assert "fictional document contents" in complete.text
+            await daemon._dispatch_built_message_event(complete)
+            await wait_until(lambda: daemon._gateway_wal.processed_up_to == 2)
+            assert len(memu.turn_calls) == (0 if age else 1)
+            saved = dict(daemon._db._conn.execute("SELECT * FROM messages WHERE id=?", (original["id"],)).fetchone())
+            assert saved == {**original, "content": complete.text}
+            assert dict(daemon._db._conn.execute("SELECT * FROM messages WHERE id=?", (later_id,)).fetchone()) == later
+            for seq, urls in [(3, []), (4, [str(tmp_path / "missing.txt")])]:
+                weaker = await daemon._build_message_event({**raw, "wal_seq": seq, "mediaUrls": urls,
+                    "_document_text_injected": True})
+                await daemon._dispatch_built_message_event(weaker)
+            assert daemon._db._conn.execute("SELECT content FROM messages WHERE id=?", (original["id"],)).fetchone()[0] == complete.text
+            assert len(memu.turn_calls) == (0 if age else 1)
+        finally:
+            await daemon.disconnect()
+
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize("complete_first", [False, True])
-def test_queue_history_attachment_upgrade_reaches_one_turn_across_ack_restart(tmp_path, monkeypatch, complete_first):
+@pytest.mark.parametrize("age", [0, 700])
+def test_queue_history_attachment_upgrade_reaches_one_turn_across_ack_restart(tmp_path, monkeypatch, complete_first, age):
     async def run():
         memu = FakeMemu()
         daemon = make_daemon(tmp_path, monkeypatch, memu)
@@ -1696,51 +1739,89 @@ def test_queue_history_attachment_upgrade_reaches_one_turn_across_ack_restart(tm
         document = tmp_path / "fictional-document.txt"
         document.write_text("fictional file contents")
         module_url = (daemon._bridge_script.parent / "durable_queue.js").as_uri()
+        port_file = tmp_path / "fixture-port.json"
         script = """
-const [moduleURL, queueDir, file, timestamp, completeFirst] = process.argv.slice(1);
+import http from 'node:http';
+import { writeFileSync } from 'node:fs';
+const [moduleURL, queueDir, file, timestamp, completeFirst, portFile] = process.argv.slice(1);
 const { DurableQueue } = await import(moduleURL);
 const base = {chatId:'fictional@g.us', messageId:'attachment-1', senderId:'fictional@lid',
   isGroup:true, body:'fictional attachment', hasMedia:true, mediaType:'document',
   deliveryMode:'persist_only', timestamp:Number(timestamp)};
 const complete = {...base, eventType:'history_message', mediaUrls:[file]};
 const incomplete = {...base, eventType:'history_message', mediaUrls:[]};
-const events = [];
-for (const event of [
-  ...(completeFirst === 'true' ? [complete, incomplete] : [incomplete, complete]),
-  {...base, deliveryMode:'live', mediaUrls:[file]}, complete,
-]) {
-  const queue = new DurableQueue({queueDir, compactionEveryAcks:1});
-  queue.enqueue(event);
-  const rows = queue.readUnacked(10);
-  events.push(...rows);
-  if (rows.length) queue.ackThrough(rows.at(-1).seq);
-}
-console.log(JSON.stringify(events));
+let queue = new DurableQueue({queueDir, compactionEveryAcks:1});
+queue.enqueue(completeFirst === 'true' ? complete : incomplete);
+let firstRead = true;
+const server = http.createServer((request, response) => {
+  response.setHeader('Content-Type','application/json');
+  if (request.url.startsWith('/messages')) {
+    const snapshot = JSON.parse(JSON.stringify(queue.readUnacked(100)));
+    if (firstRead) { queue.enqueue(completeFirst === 'true' ? incomplete : complete); firstRead=false; }
+    if (snapshot.some(row=>row.deliveryMode==='persist_only' && row.mediaUrls.length)) {
+      queue.enqueue({...base, deliveryMode:'live', mediaUrls:[file]});
+    }
+    response.end(JSON.stringify(snapshot));
+  } else if (request.url === '/ack') {
+    let body=''; request.on('data',chunk=>body+=chunk);
+    request.on('end',()=>{
+      const result=queue.ackThrough(JSON.parse(body).up_to_seq);
+      queue=new DurableQueue({queueDir,compactionEveryAcks:1});
+      response.end(JSON.stringify(result));
+    });
+  } else response.end(JSON.stringify({status:'connected'}));
+});
+server.listen(0,'127.0.0.1',()=>writeFileSync(portFile,JSON.stringify(server.address().port)));
+process.stdin.resume(); process.stdin.on('end',()=>server.close());
 """
-        result = subprocess.run([
+        proc = subprocess.Popen([
             "node", "--input-type=module", "-e", script, module_url,
-            str(tmp_path / "queue"), str(document), str(time.time()), str(complete_first).lower(),
-        ], check=True, capture_output=True, text=True, timeout=10)
-        rows = json.loads(result.stdout)
+            str(tmp_path / "queue"), str(document), str(time.time() - age), str(complete_first).lower(), str(port_file),
+        ], stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+        poll = daemon._bridge_get_json
+        rows = []
+
+        async def read(*args, **kwargs):
+            result = await poll(*args, **kwargs)
+            if args[0] == "/messages":
+                rows.extend(result)
+                if not result:
+                    daemon._running = False
+            return result
+
+        async def no_recovery(*_args):
+            pytest.fail("The disposable bridge fixture failed; no real bridge may start")
+
         try:
+            await wait_until(port_file.exists)
+            daemon._bridge_port = json.loads(port_file.read_text())
+            daemon._bridge_get_json = read
+            daemon._recover_bridge_once = no_recovery
+            daemon._running = True
+            await daemon._poll_messages()
             assert len(rows) == (2 if complete_first else 3)
-            for raw in rows:
-                wal = daemon._gateway_wal.append(raw)
-                raw["wal_seq"] = wal["wal_seq"]
-                built = await daemon._build_message_event(raw)
-                assert built is not None
-                assert built.media_urls == raw["mediaUrls"]
-                await daemon._dispatch_built_message_event(built)
-                await wait_until(lambda: daemon._gateway_wal.processed_up_to >= wal["wal_seq"])
-                if raw["deliveryMode"] == "persist_only":
-                    assert len(memu.turn_calls) == (1 if raw["mediaUrls"] else 0)
-            assert len(memu.turn_calls) == 1
-            assert memu.turn_calls[0]["message"] == (
-                "[Content of fictional-document.txt]:\nfictional file contents\n\nfictional attachment")
+            await wait_until(lambda: daemon._gateway_wal.processed_up_to == rows[-1]["seq"])
+            assert len(memu.turn_calls) == (0 if age else 1)
+            expected = "[Content of fictional-document.txt]:\nfictional file contents\n\nfictional attachment"
+            if not age:
+                assert memu.turn_calls[0]["message"] == expected
+            saved = daemon._db._conn.execute(
+                "SELECT content FROM messages WHERE source_message_id='attachment-1'").fetchall()
+            assert len(saved) == 1
+            assert saved[0][0] == expected
             assert daemon._db.message_source_key_is_processed(
-                source_chat_id="fictional@g.us", source_message_id="attachment-1")
+                source_chat_id="fictional@g.us", source_message_id="attachment-1") is (age == 0)
         finally:
-            await daemon.disconnect()
+            try:
+                await daemon.disconnect()
+            finally:
+                proc.stdin.close()
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    proc.terminate()
+                    proc.wait(timeout=5)
+                proc.stderr.close()
 
     asyncio.run(run())
 
