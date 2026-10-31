@@ -116,8 +116,8 @@ Hermes:
   retains completeness across ACK/restart in internal seen metadata; external
   `deliveryMode` and original source time remain unchanged. Handed-out rows are
   immutable; upgrades use new sequences so old ACKs cannot delete them.
-  Successfully extracted document text enriches the original stored row, even
-  when too old to trigger a turn. Only supported text-like files up to 100 KB
+  Saved history stays first-write-wins: a later complete copy does not replace
+  an earlier incomplete row. Only supported text-like files up to 100 KB
   inject file contents; images, voice, video and PDFs supply captions/placeholders,
   not decoded media contents. This does not add media understanding.
 - History may trigger a turn when it is the first new-enough arrival. That is a

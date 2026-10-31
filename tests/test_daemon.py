@@ -1687,48 +1687,6 @@ def test_history_then_live_records_both_arrivals_and_turns_once(tmp_path, monkey
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("complete_mode", ["persist_only", "live"])
-@pytest.mark.parametrize("age", [0, 700])
-def test_completed_document_enriches_saved_source_without_changing_other_rows(tmp_path, monkeypatch, complete_mode, age):
-    async def run():
-        memu = FakeMemu()
-        daemon = make_daemon(tmp_path, monkeypatch, memu)
-        daemon.send = lambda *_args, **_kwargs: asyncio.sleep(0, result=SendResult(True, "sent-1"))
-        document = tmp_path / "fictional.txt"
-        document.write_text("fictional document contents")
-        raw = {"chatId": "fictional@g.us", "messageId": "attachment-1", "senderId": "first@lid",
-               "senderName": "Fictional First", "isGroup": True, "body": "caption", "hasMedia": True,
-               "mediaType": "document", "mediaUrls": [], "timestamp": time.time() - age,
-               "deliveryMode": "persist_only", "wal_seq": 1}
-        try:
-            await daemon._dispatch_built_message_event(await daemon._build_message_event(raw))
-            original = dict(daemon._db._conn.execute(
-                "SELECT * FROM messages WHERE source_message_id='attachment-1'").fetchone())
-            later_id = daemon._db.append_message(original["session_id"], "user", "fictional later message",
-                sender_id="later@lid", sender_name="Fictional Later", source_chat_id=raw["chatId"],
-                source_message_id="later-1", timestamp=raw["timestamp"] + 1)
-            later = dict(daemon._db._conn.execute("SELECT * FROM messages WHERE id=?", (later_id,)).fetchone())
-            complete = await daemon._build_message_event({**raw, "mediaUrls": [str(document)],
-                "deliveryMode": complete_mode, "wal_seq": 2})
-            assert "fictional document contents" in complete.text
-            await daemon._dispatch_built_message_event(complete)
-            await wait_until(lambda: daemon._gateway_wal.processed_up_to == 2)
-            assert len(memu.turn_calls) == (0 if age else 1)
-            saved = dict(daemon._db._conn.execute("SELECT * FROM messages WHERE id=?", (original["id"],)).fetchone())
-            assert saved == {**original, "content": complete.text}
-            assert dict(daemon._db._conn.execute("SELECT * FROM messages WHERE id=?", (later_id,)).fetchone()) == later
-            for seq, urls in [(3, []), (4, [str(tmp_path / "missing.txt")])]:
-                weaker = await daemon._build_message_event({**raw, "wal_seq": seq, "mediaUrls": urls,
-                    "_document_text_injected": True})
-                await daemon._dispatch_built_message_event(weaker)
-            assert daemon._db._conn.execute("SELECT content FROM messages WHERE id=?", (original["id"],)).fetchone()[0] == complete.text
-            assert len(memu.turn_calls) == (0 if age else 1)
-        finally:
-            await daemon.disconnect()
-
-    asyncio.run(run())
-
-
 @pytest.mark.parametrize("complete_first", [False, True])
 @pytest.mark.parametrize("age", [0, 700])
 def test_queue_history_attachment_upgrade_reaches_one_turn_across_ack_restart(tmp_path, monkeypatch, complete_first, age):
@@ -1808,7 +1766,7 @@ process.stdin.resume(); process.stdin.on('end',()=>server.close());
             saved = daemon._db._conn.execute(
                 "SELECT content FROM messages WHERE source_message_id='attachment-1'").fetchall()
             assert len(saved) == 1
-            assert saved[0][0] == expected
+            assert saved[0][0] == (expected if complete_first else "fictional attachment")
             assert daemon._db.message_source_key_is_processed(
                 source_chat_id="fictional@g.us", source_message_id="attachment-1") is (age == 0)
         finally:

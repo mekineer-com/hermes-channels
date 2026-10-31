@@ -696,10 +696,6 @@ class ChannelsDaemon:
                 raw.get("deliveryMode"),
             )
         source_key = self._whatsapp_source_key(raw)
-        if delivery_mode != "revoke" and source_key and raw.get("_document_text_injected"):
-            self._db.update_message_content_by_source_key(
-                source_chat_id=source_key[0], source_message_id=source_key[1], content=event.text,
-            )
         if delivery_mode == "live" and self.settings.max_message_age_seconds > 0:
             timestamp = _coerce_gateway_timestamp(raw.get("timestamp"))
             if timestamp is not None:
@@ -951,6 +947,9 @@ class ChannelsDaemon:
                 source_message_id=source_message_id,
                 timestamp=message_timestamp,
             )
+        if sender_id or sender_name:
+            self._db.set_latest_user_sender(entry.session_id, sender_id=sender_id, sender_name=sender_name)
+
         conversation_id = build_conversation_id(
             platform=source.platform,
             chat_id=source.chat_id,
@@ -1183,8 +1182,6 @@ class ChannelsDaemon:
         if data.get("isGroup"):
             body = self._clean_bot_mention_text(body, data)
 
-        raw_message = dict(data)
-        raw_message["_document_text_injected"] = False
         MAX_TEXT_INJECT_BYTES = 100 * 1024
         if msg_type == MessageType.DOCUMENT and cached_urls:
             for doc_path in cached_urls:
@@ -1208,11 +1205,11 @@ class ChannelsDaemon:
                             body = f"{injection}\n\n{body}"
                         else:
                             body = injection
-                        raw_message["_document_text_injected"] = True
                         logger.info("[whatsapp] Injected text content from: %s", doc_path)
                     except Exception as e:
                         logger.warning("[whatsapp] Failed to read document text: %s", e)
 
+        raw_message = dict(data)
         raw_message["chatName"] = chat_name
         return MessageEvent(
             text=body,
@@ -1579,6 +1576,8 @@ class ChannelsDaemon:
             source_message_id=source_message_id,
             timestamp=message_timestamp,
         )
+        if role == "user" and (sender_id or sender_name):
+            self._db.set_latest_user_sender(session_entry.session_id, sender_id=sender_id, sender_name=sender_name)
 
     def _persist_exception_turn(
         self,
@@ -1613,6 +1612,8 @@ class ChannelsDaemon:
                 source_message_id=source_message_id,
                 timestamp=message_timestamp,
             )
+            if sender_id or sender_name:
+                self._db.set_latest_user_sender(session_entry.session_id, sender_id=sender_id, sender_name=sender_name)
         self._db.append_message(session_entry.session_id, "assistant", error_response, source_chat_id=source.chat_id)
 
     def _route_whatsapp_notice_to_self_dm(self, text: str, conversation_id: str, notice_kind: str) -> bool:
