@@ -1,14 +1,19 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 
+import { DurableQueue } from './durable_queue.js';
 import { createMessageIngest } from './message_ingest.js';
 
-function makeIngest({ sock = { user: { id: '111:1@s.whatsapp.net', lid: '111@lid', name: 'Me' } }, replyPrefix = '' } = {}) {
+function makeIngest({ sock = { user: { id: '111:1@s.whatsapp.net', lid: '111@lid', name: 'Me' } }, replyPrefix = '',
+  durableQueue, resolveGroupChatName = async () => '', whatsappMode = 'self-chat' } = {}) {
   const queued = [];
   const rememberedChats = [];
   const normalizeId = (value) => String(value || '').trim().replace(/:.*@/, '@');
   const ingest = createMessageIngest({
-    durableQueue: {
+    durableQueue: durableQueue || {
       enqueue(event) {
         queued.push(event);
         return true;
@@ -33,7 +38,7 @@ function makeIngest({ sock = { user: { id: '111:1@s.whatsapp.net', lid: '111@lid
     },
     normalizeId,
     getSock: () => sock,
-    resolveGroupChatName: async () => '',
+    resolveGroupChatName,
     logger: {},
     config: {
       allowedUsers: new Set(),
@@ -47,7 +52,7 @@ function makeIngest({ sock = { user: { id: '111:1@s.whatsapp.net', lid: '111@lid
       sessionDir: '/tmp',
       startupReplayGraceSeconds: 120,
       syncHistoryWindowDays: 14,
-      whatsappMode: 'self-chat',
+      whatsappMode,
     },
   });
   return { ingest, queued, rememberedChats };
@@ -97,6 +102,38 @@ test('handleUpsert queues a self-chat text event with current delivery fields', 
     row: { isGroup: false, name: '111', lastSenderName: '' },
   }]);
 });
+
+for (const acked of [false, true]) {
+  test(`an in-flight group upsert cannot resurrect a revoked message, acked=${acked}`, async () => {
+    const queueDir = mkdtempSync(path.join(tmpdir(), 'fictional-revoke-'));
+    let release, entered;
+    const lookup = new Promise(resolve => { release = resolve; });
+    const reachedLookup = new Promise(resolve => { entered = resolve; });
+    let pending;
+    try {
+      const queue = new DurableQueue({ queueDir, compactionEveryAcks: 1 });
+      const { ingest } = makeIngest({
+        durableQueue: queue, whatsappMode: 'bot',
+        resolveGroupChatName: () => { entered(); return lookup; },
+      });
+      const key = { remoteJid: 'fictional@g.us', id: 'human-1', fromMe: true };
+      pending = ingest.handleUpsert({ type: 'notify', messages: [{ key,
+        message: { conversation: 'fictional revoked message' }, messageTimestamp: Date.now() / 1000 }] });
+      await reachedLookup;
+      ingest.handleUpdate([{ key, update: { messageStubType: 1, message: null } }]);
+      const revoked = queue.readUnacked(100);
+      assert.deepEqual(revoked.map(row => row.deliveryMode), ['revoke']);
+      if (acked) queue.ackThrough(revoked[0].seq);
+      release('Fictional Group');
+      await pending;
+      assert.deepEqual(queue.readUnacked(100).map(row => row.deliveryMode), acked ? [] : ['revoke']);
+    } finally {
+      release('Fictional Group');
+      if (pending) await pending;
+      rmSync(queueDir, { recursive: true, force: true });
+    }
+  });
+}
 
 test('history events preserve both timestamps and prefer client send time', async () => {
   const { ingest, queued } = makeIngest();

@@ -310,7 +310,7 @@ export class DurableQueue {
     if (!eventUid) return null;
     if (hasValue(event.timestamp)) event.timestamp = normalizeTimestamp(event.timestamp);
     const incomingSeenMode = seenModeFor(event);
-    if (incomingSeenMode === 'persist_only_media' && this.seenModeByUid.has(`revoke:${eventUid}`)) return null;
+    if (incomingSeenMode !== 'revoke' && this.seenModeByUid.has(`revoke:${eventUid}`)) return null;
     const matching = this.unacked.filter((row) => row?.event_uid === eventUid);
     const existing = matching.find((row) => row.seq > this.readUpToSeq);
     if (existing) {

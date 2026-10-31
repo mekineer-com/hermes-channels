@@ -426,7 +426,9 @@ for (const acked of [false, true]) {
         queue = new DurableQueue({ queueDir, compactionEveryAcks: 1 });
       }
       assert.equal(queue.enqueue({ ...base, mediaUrls: ['/fictional/document.txt'] }), null);
+      assert.equal(queue.enqueue({ ...base, deliveryMode: 'live', mediaUrls: ['/fictional/document.txt'] }), null);
       if (!acked) assert.deepEqual(first.mediaUrls, []);
+      assert.ok(queue.enqueue({ ...base, messageId: 'replacement-1', deliveryMode: 'live' }));
     } finally {
       rmSync(queueDir, { recursive: true, force: true });
     }
