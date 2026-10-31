@@ -62,10 +62,11 @@ async function main() {
   ensureDir(dbPath);
   ensureDir(statusPath);
   const status = new StatusWriter(statusPath, { stats: memoryStatsMb });
+  console.log(new Date().toISOString(), 'WhatsApp Web source starting');
   status.write({ state: 'starting', wwebjs_ready: false, db_writeable: false }, { immediate: true });
 
   const store = new StoreWriter(dbPath, (error) => {
-    console.error(error.message);
+    console.error(new Date().toISOString(), error.message);
     status.write(
       { state: 'degraded', wwebjs_ready: wwebjsReady, db_writeable: false, error: error.message },
       { immediate: true },
@@ -135,6 +136,7 @@ async function main() {
     shutdownCode ||= code;
     if (shutdownPromise) return shutdownPromise;
     stopping = true;
+    console.log(new Date().toISOString(), 'WhatsApp Web source stopping');
     store.drain();
     if (shutdownCode === 0) {
       status.write({ state: 'stopping', wwebjs_ready: false, db_writeable: !store.exitedError }, { immediate: true });
@@ -162,9 +164,10 @@ async function main() {
       status.flush();
       process.stdin.pause();
       process.exitCode = shutdownCode;
+      console.log(new Date().toISOString(), 'WhatsApp Web source stopped');
     })();
     shutdownPromise.catch((error) => {
-      console.error('web-source shutdown failed:', error);
+      console.error(new Date().toISOString(), 'web-source shutdown failed:', error);
       status.write({ state: 'degraded', wwebjs_ready: false, error: error.message, db_writeable: false }, { immediate: true });
       process.exitCode = 1;
     });
@@ -175,7 +178,7 @@ async function main() {
     if (fatalHandled) return;
     fatalHandled = true;
     const message = error?.stack || error?.message || String(error);
-    console.error(message);
+    console.error(new Date().toISOString(), message);
     status.write(
       { state: 'degraded', wwebjs_ready: wwebjsReady, db_writeable: !store.exitedError, error: error?.message || String(error) },
       { immediate: true },
@@ -224,7 +227,7 @@ async function main() {
   }
 
   function persistFailed(label, error) {
-    console.error(`${label} failed:`, error);
+    console.error(new Date().toISOString(), `${label} failed:`, error);
     status.write(
       { state: 'degraded', wwebjs_ready: wwebjsReady, db_writeable: !store.exitedError, error: error.message },
       { immediate: true },
@@ -232,23 +235,23 @@ async function main() {
   }
 
   on('qr', (qr) => {
-    console.log('Pair WhatsApp Web with the QR shown by the launcher.');
+    console.log(new Date().toISOString(), 'Pair WhatsApp Web with the QR shown by the launcher.');
     status.write({ state: 'pairing', qr, wwebjs_ready: false, db_writeable: true }, { immediate: true });
   });
 
   on('authenticated', () => {
-    console.log('WhatsApp Web source authenticated');
+    console.log(new Date().toISOString(), 'WhatsApp Web source authenticated');
     status.write({ state: 'authenticated', qr: null, wwebjs_ready: false, db_writeable: true }, { immediate: true });
   });
 
   on('auth_failure', (message) => {
-    console.error('WhatsApp Web source auth failure:', message);
+    console.error(new Date().toISOString(), 'WhatsApp Web source auth failure:', message);
     status.write({ state: 'auth_failure', qr: null, wwebjs_ready: false, db_writeable: !store.exitedError, error: String(message) }, { immediate: true });
     shutdown(1);
   });
 
   on('ready', async () => {
-    console.log('WhatsApp Web source ready');
+    console.log(new Date().toISOString(), 'WhatsApp Web source ready');
     wwebjsReady = true;
     status.write({ state: 'ready', qr: null, wwebjs_ready: true, db_writeable: true, error: null }, { immediate: true });
     if (args['no-resource-block'] !== true) {
@@ -277,6 +280,7 @@ async function main() {
       try {
         const result = await backfill.chatsSince(backfillSince);
         console.log(
+          new Date().toISOString(),
           `backfill since ${backfillSince}: ${result.scannedChats} chats, ${result.fetched} fetched ` +
           `(${result.inserted} inserted, ${result.updated} updated)`,
         );
@@ -314,6 +318,7 @@ async function main() {
         const chat = await client.getChatById(backfillChat);
         const result = await backfill.chatMessages(chat, backfillChat, backfillSince);
         console.log(
+          new Date().toISOString(),
           `backfill ${backfillChat}: ${result.fetched} rows ` +
           `(${result.inserted} inserted, ${result.updated} updated)`,
         );
@@ -403,7 +408,7 @@ async function main() {
   });
 
   on('disconnected', (reason) => {
-    console.error('WhatsApp Web source disconnected:', reason);
+    console.error(new Date().toISOString(), 'WhatsApp Web source disconnected:', reason);
     wwebjsReady = false;
     status.write({ state: 'disconnected', wwebjs_ready: false, db_writeable: !store.exitedError, error: String(reason) }, { immediate: true });
     // Preserve the existing logout classification after admitted writes drain.
@@ -427,6 +432,6 @@ async function main() {
 }
 
 main().catch((error) => {
-  console.error(error);
+  console.error(new Date().toISOString(), error);
   process.exit(1);
 });

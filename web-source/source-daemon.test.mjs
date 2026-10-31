@@ -11,6 +11,7 @@ import { format } from 'node:util';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const source = readFileSync(join(here, 'source-daemon.js'), 'utf8');
+const datedLog = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z /;
 
 test('source daemon help preserves active-scope and diagnostics flags', () => {
   const output = execFileSync(process.execPath, [join(here, 'source-daemon.js'), '--help'], {
@@ -142,6 +143,11 @@ test('source daemon keeps pairing QR out of logs and clears it on ready, authent
     await new Promise(setImmediate);
   }
   assert.ok(!f.logs.join('\n').includes(qr));
+  for (const notice of ['Pair WhatsApp Web', 'source authenticated', 'source ready', 'source auth failure:']) {
+    const lines = f.logs.filter(line => line.includes(notice));
+    assert.ok(lines.length > 0, notice);
+    for (const line of lines) assert.match(line, datedLog);
+  }
 });
 
 for (const backfillMode of ['since', 'chat']) {
@@ -165,6 +171,8 @@ for (const backfillMode of ['since', 'chat']) {
         await new Promise(setImmediate);
       }
       assert.equal(f.process.exitCode, disconnected ? 1 : 0);
+      assert.match(f.logs.find(line => line.includes('backfill failed:')), datedLog);
+      if (disconnected) assert.match(f.logs.find(line => line.includes('source disconnected:')), datedLog);
     });
   }
 }
@@ -193,6 +201,7 @@ for (const backfillMode of ['since', 'chat']) {
       assert.equal(final.wwebjs_ready, false);
       assert.equal(f.process.exitCode, reason === 'LOGOUT' ? 42 : reason ? 1 : 0);
       assert.equal(f.calls.at(-1), 'status-flush');
+      assert.match(f.logs.find(line => line.includes(`backfill ${backfillMode === 'since' ? 'since 1:' : 'fictional-chat:'}`)), datedLog);
     });
   }
 }
@@ -265,6 +274,7 @@ for (const signal of ['SIGINT', 'SIGTERM', 'end']) {
     assert.ok(f.calls.includes('writer-drain'));
     assert.ok(!f.calls.includes('browser-close-request'));
     assert.ok(!f.calls.includes('writer-eof'));
+    assert.ok(!f.logs.some(line => line.includes('source stopped')));
     f.enrichment.resolve();
     await new Promise(setImmediate);
     assert.ok(f.calls.includes('contact-write'));
@@ -282,6 +292,11 @@ for (const signal of ['SIGINT', 'SIGTERM', 'end']) {
     assert.equal(f.calls.filter(call => call === 'upsert_message').length, 1);
     assert.equal(f.calls.filter(call => call === 'destroy').length, 1);
     assert.equal(f.calls.at(-1), 'status-flush');
+    for (const state of ['starting', 'stopping', 'stopped']) {
+      const lines = f.logs.filter(line => line.includes(`WhatsApp Web source ${state}`));
+      assert.equal(lines.length, 1, state);
+      assert.match(lines[0], datedLog);
+    }
   });
 }
 
