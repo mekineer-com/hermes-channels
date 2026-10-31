@@ -641,6 +641,61 @@ def test_poll_recovers_adopted_bridge_when_endpoint_disappears(tmp_path, monkeyp
     asyncio.run(run())
 
 
+def test_arrival_evidence_lock_does_not_strand_polled_message(tmp_path, monkeypatch, caplog):
+    async def run():
+        daemon = make_daemon(tmp_path, monkeypatch)
+        daemon._running = True
+        daemon._db._conn.execute("PRAGMA busy_timeout=0")
+        blocker = sqlite3.connect(daemon._db.path)
+        blocker.execute("BEGIN IMMEDIATE")
+        record = daemon._db.record_whatsapp_arrival
+        acked, dispatched = [], []
+        raw = {"seq": 7, "deliveryMode": "live", "chatId": "123@lid", "messageId": "poll-1",
+               "senderId": "123@lid", "body": "fictional human message", "timestamp": time.time()}
+
+        def locked_record(*args, **kwargs):
+            try:
+                return record(*args, **kwargs)
+            finally:
+                blocker.rollback()
+
+        async def messages(*_args, **_kwargs):
+            if acked:
+                daemon._running = False
+                return []
+            return [dict(raw)]
+
+        async def acknowledge(seq):
+            acked.append(seq)
+
+        async def dispatch(event):
+            dispatched.append(event.message_id)
+            daemon._gateway_wal.mark_processed(event.raw_message["wal_seq"])
+
+        real_sleep = asyncio.sleep
+
+        async def no_poll_backoff(delay):
+            await real_sleep(0 if delay == 5 else delay)
+
+        monkeypatch.setattr(asyncio, "sleep", no_poll_backoff)
+        daemon._db.record_whatsapp_arrival = locked_record
+        daemon._bridge_get_json = messages
+        daemon._ack_bridge_message = acknowledge
+        daemon._bridge_health = lambda: async_value({"status": "connected"})
+        daemon._dispatch_built_message_event = dispatch
+        try:
+            await daemon._poll_messages()
+            assert dispatched == ["poll-1"]
+            assert acked == [7]
+            assert daemon._gateway_wal.pending() == []
+            assert "arrival evidence" in caplog.text
+        finally:
+            blocker.close()
+            await daemon.disconnect()
+
+    asyncio.run(run())
+
+
 def test_poll_requests_daemon_stop_when_bridge_recovery_fails(tmp_path, monkeypatch):
     async def run():
         daemon = make_daemon(tmp_path, monkeypatch)

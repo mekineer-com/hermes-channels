@@ -13,6 +13,7 @@ import os
 import re
 import shutil
 import signal
+import sqlite3
 import subprocess
 import sys
 import threading
@@ -1653,11 +1654,15 @@ class ChannelsDaemon:
         source_key = self._whatsapp_source_key(raw)
         if source_key is None:
             return
-        self._db.record_whatsapp_arrival(
-            source_chat_id=source_key[0],
-            source_message_id=source_key[1],
-            mode=delivery_mode,
-        )
+        try:
+            self._db.record_whatsapp_arrival(
+                source_chat_id=source_key[0],
+                source_message_id=source_key[1],
+                mode=delivery_mode,
+            )
+        except sqlite3.Error:
+            # Arrival evidence is optional, unlike message storage and completion.
+            logger.warning("Failed to record WhatsApp arrival evidence; continuing delivery", exc_info=True)
 
     def _source_key_is_active(self, source_key: tuple[str, str] | None) -> bool:
         return bool(source_key and source_key in self._active_source_keys)
