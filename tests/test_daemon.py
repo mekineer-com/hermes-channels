@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import sqlite3
+import subprocess
 import threading
 import time
 from dataclasses import dataclass
@@ -1682,6 +1683,64 @@ def test_history_then_live_records_both_arrivals_and_turns_once(tmp_path, monkey
             assert row["seen_history_at"] is not None
             assert row["seen_live_at"] is not None
         await daemon.disconnect()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("complete_first", [False, True])
+def test_queue_history_attachment_upgrade_reaches_one_turn_across_ack_restart(tmp_path, monkeypatch, complete_first):
+    async def run():
+        memu = FakeMemu()
+        daemon = make_daemon(tmp_path, monkeypatch, memu)
+        daemon.send = lambda *_args, **_kwargs: asyncio.sleep(0, result=SendResult(True, "sent-1"))
+        document = tmp_path / "fictional-document.txt"
+        document.write_text("fictional file contents")
+        module_url = (daemon._bridge_script.parent / "durable_queue.js").as_uri()
+        script = """
+const [moduleURL, queueDir, file, timestamp, completeFirst] = process.argv.slice(1);
+const { DurableQueue } = await import(moduleURL);
+const base = {chatId:'fictional@g.us', messageId:'attachment-1', senderId:'fictional@lid',
+  isGroup:true, body:'fictional attachment', hasMedia:true, mediaType:'document',
+  deliveryMode:'persist_only', timestamp:Number(timestamp)};
+const complete = {...base, eventType:'history_message', mediaUrls:[file]};
+const incomplete = {...base, eventType:'history_message', mediaUrls:[]};
+const events = [];
+for (const event of [
+  ...(completeFirst === 'true' ? [complete, incomplete] : [incomplete, complete]),
+  {...base, deliveryMode:'live', mediaUrls:[file]}, complete,
+]) {
+  const queue = new DurableQueue({queueDir, compactionEveryAcks:1});
+  queue.enqueue(event);
+  const rows = queue.readUnacked(10);
+  events.push(...rows);
+  if (rows.length) queue.ackThrough(rows.at(-1).seq);
+}
+console.log(JSON.stringify(events));
+"""
+        result = subprocess.run([
+            "node", "--input-type=module", "-e", script, module_url,
+            str(tmp_path / "queue"), str(document), str(time.time()), str(complete_first).lower(),
+        ], check=True, capture_output=True, text=True, timeout=10)
+        rows = json.loads(result.stdout)
+        try:
+            assert len(rows) == (2 if complete_first else 3)
+            for raw in rows:
+                wal = daemon._gateway_wal.append(raw)
+                raw["wal_seq"] = wal["wal_seq"]
+                built = await daemon._build_message_event(raw)
+                assert built is not None
+                assert built.media_urls == raw["mediaUrls"]
+                await daemon._dispatch_built_message_event(built)
+                await wait_until(lambda: daemon._gateway_wal.processed_up_to >= wal["wal_seq"])
+                if raw["deliveryMode"] == "persist_only":
+                    assert len(memu.turn_calls) == (1 if raw["mediaUrls"] else 0)
+            assert len(memu.turn_calls) == 1
+            assert memu.turn_calls[0]["message"] == (
+                "[Content of fictional-document.txt]:\nfictional file contents\n\nfictional attachment")
+            assert daemon._db.message_source_key_is_processed(
+                source_chat_id="fictional@g.us", source_message_id="attachment-1")
+        finally:
+            await daemon.disconnect()
 
     asyncio.run(run())
 

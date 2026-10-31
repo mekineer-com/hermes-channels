@@ -146,7 +146,14 @@ function seenModeFor(event) {
   const deliveryMode = String(event?.deliveryMode || '').trim().toLowerCase();
   if (eventType === 'revoke' || deliveryMode === 'revoke') return 'revoke';
   if (deliveryMode === 'live') return 'live';
+  // Internal dedupe mode only; deliveryMode remains persist_only.
+  if (event?.hasMedia && Array.isArray(event.mediaUrls) && event.mediaUrls.length) return 'persist_only_media';
   return 'persist_only';
+}
+
+function canUpgradeSeenMode(seenMode, incomingMode) {
+  return ((seenMode === 'persist_only' || seenMode === 'persist_only_media') && incomingMode === 'live')
+    || (seenMode === 'persist_only' && incomingMode === 'persist_only_media');
 }
 
 export class DurableQueue {
@@ -200,7 +207,8 @@ export class DurableQueue {
       const eventUid = eventUidFor(row);
       if (hasValue(row.timestamp)) row.timestamp = normalizeTimestamp(row.timestamp);
       if (eventUid) row.event_uid = eventUid;
-      if (eventUid && !this.seenModeByUid.has(eventUid)) {
+      if (eventUid && (!this.seenModeByUid.has(eventUid)
+          || canUpgradeSeenMode(this.seenModeByUid.get(eventUid), seenModeFor(row)))) {
         this.seenModeByUid.set(eventUid, seenModeFor(row));
         seenDirty = true;
       }
@@ -300,22 +308,24 @@ export class DurableQueue {
     if (!eventUid) return null;
     if (hasValue(event.timestamp)) event.timestamp = normalizeTimestamp(event.timestamp);
     const incomingSeenMode = seenModeFor(event);
+    if (incomingSeenMode === 'persist_only_media' && this.seenModeByUid.has(`revoke:${eventUid}`)) return null;
     const existing = this.unacked.find((row) => row?.event_uid === eventUid);
     if (existing) {
       mergeQueuedEvent(existing, event);
       const mergedMode = seenModeFor(existing);
       this.seenModeByUid.set(eventUid, mergedMode);
       if (hasValue(existing.timestamp)) this.seenTimestampByUid.set(eventUid, existing.timestamp);
-      this._persistSeen();
+      // Commit the usable payload before recording its stronger dedupe mode.
       this._compact();
+      this._persistSeen();
       return existing;
     }
     const seenMode = this.seenModeByUid.get(eventUid);
-    if (seenMode && !(seenMode === 'persist_only' && incomingSeenMode === 'live')) {
+    if (seenMode && !canUpgradeSeenMode(seenMode, incomingSeenMode)) {
       return null;
     }
     const seenTimestamp = this.seenTimestampByUid.get(eventUid);
-    if (seenMode === 'persist_only' && incomingSeenMode === 'live' && hasValue(seenTimestamp)) {
+    if (seenMode && hasValue(seenTimestamp)) {
       event.timestamp = seenTimestamp;
     }
 

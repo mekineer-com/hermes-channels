@@ -371,3 +371,103 @@ test('durable queue normalizes long-shaped timestamps before live upgrade', () =
     rmSync(queueDir, { recursive: true, force: true });
   }
 });
+
+for (const completeFirst of [false, true]) {
+  for (const stage of ['pending', 'acked', 'restarted']) {
+    test(`history media completion survives ${stage}, completeFirst=${completeFirst}`, () => {
+      const queueDir = mkQueueDir();
+      try {
+        let queue = new DurableQueue({ queueDir, compactionEveryAcks: 1 });
+        const base = { chatId: 'fictional@g.us', messageId: 'media-1', deliveryMode: 'persist_only',
+          hasMedia: true, mediaType: 'document', body: 'fictional document', timestamp: 1000 };
+        const file = '/fictional/document.txt';
+        const first = queue.enqueue({ ...base, mediaUrls: completeFirst ? [file] : [] });
+        if (stage !== 'pending') queue.ackThrough(first.seq);
+        if (stage === 'restarted') queue = new DurableQueue({ queueDir, compactionEveryAcks: 1 });
+
+        const later = queue.enqueue({ ...base, timestamp: 2000, mediaUrls: completeFirst ? [] : [file] });
+        const complete = completeFirst ? first : later;
+        assert.ok(complete, 'a complete history copy must not be discarded after ACK');
+        assert.equal(complete.deliveryMode, 'persist_only');
+        assert.equal(complete.timestamp, 1000);
+        assert.deepEqual(complete.mediaUrls, [file]);
+        assert.equal(queue.readUnacked(10).length, completeFirst && stage !== 'pending' ? 0 : 1);
+        if (stage === 'pending') assert.equal(later, first);
+        else if (completeFirst) assert.equal(later, null);
+
+        queue.ackThrough(complete.seq);
+        queue = new DurableQueue({ queueDir, compactionEveryAcks: 1 });
+        assert.equal(queue.enqueue({ ...base, mediaUrls: [file] }), null);
+        assert.equal(queue.enqueue({ ...base, mediaUrls: [] }), null);
+        const live = queue.enqueue({ ...base, deliveryMode: 'live', mediaUrls: [file], timestamp: 3000 });
+        assert.equal(live.deliveryMode, 'live');
+        assert.equal(live.timestamp, 1000);
+        queue.ackThrough(live.seq);
+        assert.equal(queue.enqueue({ ...base, mediaUrls: [file] }), null);
+      } finally {
+        rmSync(queueDir, { recursive: true, force: true });
+      }
+    });
+  }
+}
+
+for (const acked of [false, true]) {
+  test(`complete history media does not upgrade a known revoke, acked=${acked}`, () => {
+    const queueDir = mkQueueDir();
+    try {
+      let queue = new DurableQueue({ queueDir, compactionEveryAcks: 1 });
+      const base = { chatId: 'fictional@g.us', messageId: 'media-1', deliveryMode: 'persist_only',
+        hasMedia: true, mediaType: 'document', timestamp: 1000, mediaUrls: [] };
+      const first = queue.enqueue(base);
+      if (acked) queue.ackThrough(first.seq);
+      const revoke = queue.enqueue({ ...base, deliveryMode: 'revoke' });
+      if (acked) {
+        queue.ackThrough(revoke.seq);
+        queue = new DurableQueue({ queueDir, compactionEveryAcks: 1 });
+      }
+      assert.equal(queue.enqueue({ ...base, mediaUrls: ['/fictional/document.txt'] }), null);
+      if (!acked) assert.deepEqual(first.mediaUrls, []);
+    } finally {
+      rmSync(queueDir, { recursive: true, force: true });
+    }
+  });
+}
+
+test('a failed merged-payload write cannot commit media completeness first', () => {
+  const queueDir = mkQueueDir();
+  try {
+    let queue = new DurableQueue({ queueDir, compactionEveryAcks: 1 });
+    const base = { chatId: 'fictional@g.us', messageId: 'media-1', deliveryMode: 'persist_only',
+      hasMedia: true, mediaType: 'document', timestamp: 1000, mediaUrls: [] };
+    const first = queue.enqueue(base);
+    const seenBefore = readFileSync(queue.seenPath, 'utf8');
+    queue._compact = () => { throw new Error('Fictional payload persistence failure'); };
+    assert.throws(() => queue.enqueue({ ...base, mediaUrls: ['/fictional/document.txt'] }), /payload persistence/);
+    assert.equal(readFileSync(queue.seenPath, 'utf8'), seenBefore);
+    queue = new DurableQueue({ queueDir, compactionEveryAcks: 1 });
+    assert.deepEqual(queue.readUnacked(10)[0].mediaUrls, []);
+    queue.ackThrough(first.seq);
+    assert.ok(queue.enqueue({ ...base, mediaUrls: ['/fictional/document.txt'] }));
+  } finally {
+    rmSync(queueDir, { recursive: true, force: true });
+  }
+});
+
+test('reload repairs seen metadata after payload commits but seen persistence fails', () => {
+  const queueDir = mkQueueDir();
+  try {
+    let queue = new DurableQueue({ queueDir, compactionEveryAcks: 1 });
+    const base = { chatId: 'fictional@g.us', messageId: 'media-1', deliveryMode: 'persist_only',
+      hasMedia: true, mediaType: 'document', timestamp: 1000, mediaUrls: [] };
+    const first = queue.enqueue(base);
+    queue._persistSeen = () => { throw new Error('Fictional seen persistence failure'); };
+    assert.throws(() => queue.enqueue({ ...base, mediaUrls: ['/fictional/document.txt'] }), /seen persistence/);
+    queue = new DurableQueue({ queueDir, compactionEveryAcks: 1 });
+    assert.deepEqual(queue.readUnacked(10)[0].mediaUrls, ['/fictional/document.txt']);
+    queue.ackThrough(first.seq);
+    queue = new DurableQueue({ queueDir, compactionEveryAcks: 1 });
+    assert.equal(queue.enqueue({ ...base, mediaUrls: ['/fictional/document.txt'] }), null);
+  } finally {
+    rmSync(queueDir, { recursive: true, force: true });
+  }
+});

@@ -111,8 +111,10 @@ Hermes:
   phone-originated `fromMe` messages through; bot echoes are filtered through
   sent-message echo tracking. The bridge picks and tracks each message ID before
   sending, so a send that succeeds after the HTTP timeout is still an echo.
-- Media history without downloaded media is stored but cannot trigger a turn;
-  the live copy (with the file) answers instead.
+- Media history without downloaded media is stored but cannot trigger a turn.
+  A later copy with the file may trigger, even if it is also history. The queue
+  retains completeness across ACK/restart in internal seen metadata; external
+  `deliveryMode` and original source time remain unchanged.
 - History may trigger a turn when it is the first new-enough arrival. That is a
   July 2026 OpenAlma behavior, not old Hermes parity. This includes human
   account-owner messages: `fromMe` is ownership evidence, not a Soul-reply flag.
