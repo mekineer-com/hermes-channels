@@ -1687,13 +1687,60 @@ def test_history_then_live_records_both_arrivals_and_turns_once(tmp_path, monkey
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("complete_first", [False, True])
 @pytest.mark.parametrize("age", [0, 700])
-def test_queue_history_attachment_upgrade_reaches_one_turn_across_ack_restart(tmp_path, monkeypatch, complete_first, age):
+@pytest.mark.parametrize("is_group", [False, True])
+def test_completed_history_preserves_intervening_sender(tmp_path, monkeypatch, age, is_group):
     async def run():
         memu = FakeMemu()
         daemon = make_daemon(tmp_path, monkeypatch, memu)
         daemon.send = lambda *_args, **_kwargs: asyncio.sleep(0, result=SendResult(True, "sent-1"))
+        document = tmp_path / "fictional.txt"
+        document.write_text("fictional document contents")
+        raw = {"chatId": "fictional@g.us" if is_group else "fictional@lid",
+               "messageId": "attachment-1", "senderId": "owner@lid", "senderName": "Fictional Owner",
+               "isGroup": is_group, "fromMe": True, "body": "fictional attachment", "hasMedia": True,
+               "mediaType": "document", "mediaUrls": [], "timestamp": time.time() - age,
+               "deliveryMode": "persist_only", "wal_seq": 1}
+        try:
+            await daemon._dispatch_built_message_event(await daemon._build_message_event(raw))
+            later = {**raw, "messageId": "later-1", "senderId": "fictional@lid", "senderName": "Fictional Contact",
+                     "fromMe": False, "body": "fictional later message", "hasMedia": False, "mediaType": "",
+                     "timestamp": time.time(), "deliveryMode": "live", "wal_seq": 2}
+            await daemon._dispatch_built_message_event(await daemon._build_message_event(later))
+            await wait_until(lambda: daemon._gateway_wal.processed_up_to == 2)
+            before = dict(daemon._db._conn.execute(
+                "SELECT * FROM messages WHERE source_message_id='later-1'").fetchone())
+            assert before["session_id"] == daemon._db._conn.execute(
+                "SELECT session_id FROM messages WHERE source_message_id='attachment-1'").fetchone()[0]
+            assert (before["sender_id"], before["sender_name"]) == ("fictional@lid", "Fictional Contact")
+            await daemon._dispatch_built_message_event(await daemon._build_message_event(
+                {**raw, "mediaUrls": [str(document)], "wal_seq": 3}))
+            await wait_until(lambda: daemon._gateway_wal.processed_up_to == 3)
+            assert len(memu.turn_calls) == (1 if age else 2)
+            assert dict(daemon._db._conn.execute(
+                "SELECT * FROM messages WHERE source_message_id='later-1'").fetchone()) == before
+        finally:
+            await daemon.disconnect()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("complete_first", [False, True])
+@pytest.mark.parametrize("age", [0, 700])
+@pytest.mark.parametrize("is_group", [False, True])
+@pytest.mark.parametrize("from_me", [False, True])
+def test_queue_history_attachment_upgrade_reaches_one_turn_across_ack_restart(tmp_path, monkeypatch, complete_first, age, is_group, from_me):
+    async def run():
+        memu = FakeMemu()
+        daemon = make_daemon(tmp_path, monkeypatch, memu)
+        sent = []
+
+        async def send(chat_id, content):
+            sent.append((chat_id, content))
+            return SendResult(True, "sent-1")
+
+        daemon.send = send
+        chat_id = "fictional@g.us" if is_group else "fictional@lid"
         document = tmp_path / "fictional-document.txt"
         document.write_text("fictional file contents")
         module_url = (daemon._bridge_script.parent / "durable_queue.js").as_uri()
@@ -1701,10 +1748,10 @@ def test_queue_history_attachment_upgrade_reaches_one_turn_across_ack_restart(tm
         script = """
 import http from 'node:http';
 import { writeFileSync } from 'node:fs';
-const [moduleURL, queueDir, file, timestamp, completeFirst, portFile] = process.argv.slice(1);
+const [moduleURL, queueDir, file, timestamp, completeFirst, portFile, chatId, fromMe] = process.argv.slice(1);
 const { DurableQueue } = await import(moduleURL);
-const base = {chatId:'fictional@g.us', messageId:'attachment-1', senderId:'fictional@lid',
-  isGroup:true, body:'fictional attachment', hasMedia:true, mediaType:'document',
+const base = {chatId, fromMe:fromMe==='true', messageId:'attachment-1', senderId:'fictional@lid',
+  isGroup:chatId.endsWith('@g.us'), body:'fictional attachment', hasMedia:true, mediaType:'document',
   deliveryMode:'persist_only', timestamp:Number(timestamp)};
 const complete = {...base, eventType:'history_message', mediaUrls:[file]};
 const incomplete = {...base, eventType:'history_message', mediaUrls:[]};
@@ -1735,6 +1782,7 @@ process.stdin.resume(); process.stdin.on('end',()=>server.close());
         proc = subprocess.Popen([
             "node", "--input-type=module", "-e", script, module_url,
             str(tmp_path / "queue"), str(document), str(time.time() - age), str(complete_first).lower(), str(port_file),
+            chat_id, str(from_me).lower(),
         ], stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
         poll = daemon._bridge_get_json
         rows = []
@@ -1763,12 +1811,15 @@ process.stdin.resume(); process.stdin.on('end',()=>server.close());
             expected = "[Content of fictional-document.txt]:\nfictional file contents\n\nfictional attachment"
             if not age:
                 assert memu.turn_calls[0]["message"] == expected
+                assert memu.turn_calls[0]["chat_type"] == ("group" if is_group else "dm")
+                assert memu.turn_calls[0]["source_owner_id"] == (daemon.owner_id if from_me else None)
+            assert sent == ([] if age else [(chat_id, "pong")])
             saved = daemon._db._conn.execute(
                 "SELECT content FROM messages WHERE source_message_id='attachment-1'").fetchall()
             assert len(saved) == 1
             assert saved[0][0] == (expected if complete_first else "fictional attachment")
             assert daemon._db.message_source_key_is_processed(
-                source_chat_id="fictional@g.us", source_message_id="attachment-1") is (age == 0)
+                source_chat_id=chat_id, source_message_id="attachment-1") is (age == 0)
         finally:
             try:
                 await daemon.disconnect()

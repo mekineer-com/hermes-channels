@@ -947,9 +947,6 @@ class ChannelsDaemon:
                 source_message_id=source_message_id,
                 timestamp=message_timestamp,
             )
-        if sender_id or sender_name:
-            self._db.set_latest_user_sender(entry.session_id, sender_id=sender_id, sender_name=sender_name)
-
         conversation_id = build_conversation_id(
             platform=source.platform,
             chat_id=source.chat_id,
@@ -1576,8 +1573,6 @@ class ChannelsDaemon:
             source_message_id=source_message_id,
             timestamp=message_timestamp,
         )
-        if role == "user" and (sender_id or sender_name):
-            self._db.set_latest_user_sender(session_entry.session_id, sender_id=sender_id, sender_name=sender_name)
 
     def _persist_exception_turn(
         self,
@@ -1612,8 +1607,6 @@ class ChannelsDaemon:
                 source_message_id=source_message_id,
                 timestamp=message_timestamp,
             )
-            if sender_id or sender_name:
-                self._db.set_latest_user_sender(session_entry.session_id, sender_id=sender_id, sender_name=sender_name)
         self._db.append_message(session_entry.session_id, "assistant", error_response, source_chat_id=source.chat_id)
 
     def _route_whatsapp_notice_to_self_dm(self, text: str, conversation_id: str, notice_kind: str) -> bool:

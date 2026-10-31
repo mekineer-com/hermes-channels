@@ -228,30 +228,6 @@ class ChannelsStateDB:
             ).fetchall()
         return [dict(row) for row in rows]
 
-    def set_latest_user_sender(
-        self,
-        session_id: str,
-        *,
-        sender_id: str | None = None,
-        sender_name: str | None = None,
-    ) -> None:
-        if sender_id is None and sender_name is None:
-            return
-
-        def _do(conn):
-            row = conn.execute(
-                "SELECT id FROM messages WHERE session_id = ? AND role = 'user' ORDER BY id DESC LIMIT 1",
-                (session_id,),
-            ).fetchone()
-            if not row:
-                return
-            conn.execute(
-                "UPDATE messages SET sender_id = ?, sender_name = ? WHERE id = ?",
-                (sender_id, sender_name, row[0]),
-            )
-
-        self._execute_write(_do)
-
     def delete_message_by_source_key(
         self,
         *,
