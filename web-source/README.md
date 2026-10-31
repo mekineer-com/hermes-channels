@@ -23,9 +23,11 @@ node source-daemon.js
 
 Defaults:
 
-- Auth profile: `~/.hermes/whatsapp/wwebjs_auth/session-memu-web-source`
-- Projection DB: `~/.hermes/whatsapp/web_source.db`
-- Health file: `~/.hermes/whatsapp/web_source_status.json`
+- Auth profile: `<CHANNELS_HOME>/whatsapp/wwebjs_auth/session-memu-web-source`
+- Projection DB: `<CHANNELS_HOME>/whatsapp/web_source.db`
+- Health file: `<CHANNELS_HOME>/whatsapp/web_source_status.json`
+
+`CHANNELS_HOME` defaults to the repo's `data/` directory.
 
 Backfill one bounded chat window:
 
