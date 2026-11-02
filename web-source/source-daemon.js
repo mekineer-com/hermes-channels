@@ -411,8 +411,8 @@ async function main() {
     console.error(new Date().toISOString(), 'WhatsApp Web source disconnected:', reason);
     wwebjsReady = false;
     status.write({ state: 'disconnected', wwebjs_ready: false, db_writeable: !store.exitedError, error: String(reason) }, { immediate: true });
-    // Preserve the existing logout classification after admitted writes drain.
-    shutdown(String(reason).toUpperCase() === 'LOGOUT' ? 42 : 1);
+    // Only explicit logout/unpaired states may archive auth after admitted writes drain.
+    shutdown(['LOGOUT', 'UNPAIRED', 'UNPAIRED_IDLE'].includes(String(reason).toUpperCase()) ? 42 : 1);
   });
 
   process.on('SIGINT', () => shutdown());

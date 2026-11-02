@@ -178,7 +178,11 @@ for (const backfillMode of ['since', 'chat']) {
 }
 
 for (const backfillMode of ['since', 'chat']) {
-  for (const reason of [null, 'Fixture connection lost', 'LOGOUT']) {
+  for (const [reason, exitCode] of [
+    [null, 0], ['Fixture connection lost', 1], ['LOGOUT', 42],
+    ['UNPAIRED', 42], ['UNPAIRED_IDLE', 42],
+    ['CONFLICT', 1], ['TIMEOUT', 1], ['UNLAUNCHED', 1],
+  ]) {
     test(`${backfillMode} late success cannot leave shutdown paired (${reason || 'Stop'})`, async () => {
       const f = await fixture({ backfillMode });
       await f.started;
@@ -192,14 +196,18 @@ for (const backfillMode of ['since', 'chat']) {
       assert.ok(f.statuses.some(row => row.last_backfill_at), 'Late successful backfill must run');
       assert.ok(f.calls.includes('browser-close-request'));
       assert.ok(!f.calls.includes('writer-eof'));
+      assert.equal(f.process.exitCode, undefined);
       f.browserProcess.exitCode = 0;
       f.browserProcess.emit('close', 0);
+      await new Promise(setImmediate);
+      assert.ok(f.calls.includes('writer-eof'));
+      assert.equal(f.process.exitCode, undefined);
       f.writerExit.resolve();
       await new Promise(setImmediate);
       const final = Object.assign({}, ...f.statuses);
       assert.equal(final.state, reason ? 'degraded' : 'stopping');
       assert.equal(final.wwebjs_ready, false);
-      assert.equal(f.process.exitCode, reason === 'LOGOUT' ? 42 : reason ? 1 : 0);
+      assert.equal(f.process.exitCode, exitCode);
       assert.equal(f.calls.at(-1), 'status-flush');
       assert.match(f.logs.find(line => line.includes(`backfill ${backfillMode === 'since' ? 'since 1:' : 'fictional-chat:'}`)), datedLog);
     });

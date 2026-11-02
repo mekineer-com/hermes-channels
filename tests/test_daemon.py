@@ -735,6 +735,126 @@ def test_logged_out_web_source_archives_auth_and_restarts(tmp_path, monkeypatch)
     assert restarted == [True]
 
 
+@pytest.mark.parametrize("consumer", ["poll", "setup"])
+@pytest.mark.parametrize("failure", ["backup_directory", "archive", "auth_directory"])
+def test_web_source_archive_failure_keeps_live_polling_and_setup_available(tmp_path, monkeypatch, caplog, consumer, failure):
+    async def run():
+        daemon = make_daemon(tmp_path, monkeypatch)
+        daemon.settings.web_source_enabled = True
+        daemon._running = True
+        daemon._web_source_auth_path.mkdir(parents=True)
+        (daemon._web_source_auth_path / "session.json").write_text("fictional expired auth")
+        daemon._web_source_status_path.write_text(json.dumps({"state": "degraded", "wwebjs_ready": False}))
+        daemon._web_source_process = type("Process", (), {"poll": lambda _self: 42})()
+        restarted, failures, dispatched, acked = [], [], [], []
+        daemon._start_web_source = lambda: restarted.append(True) or True
+        mkdir = type(tmp_path).mkdir
+        move = daemon_module.shutil.move
+
+        def fail():
+            failures.append(failure)
+            raise OSError("Fictional archive I/O failure")
+
+        def mkdir_or_fail(path, *args, **kwargs):
+            if ((failure == "backup_directory" and path == daemon.home / "backups")
+                    or (failure == "auth_directory" and path == daemon._web_source_auth_path)):
+                fail()
+            return mkdir(path, *args, **kwargs)
+
+        def move_or_fail(*args, **kwargs):
+            if failure == "archive":
+                fail()
+            return move(*args, **kwargs)
+
+        monkeypatch.setattr(type(tmp_path), "mkdir", mkdir_or_fail)
+        monkeypatch.setattr(daemon_module.shutil, "move", move_or_fail)
+        message_polls = []
+
+        async def messages(*_args, **_kwargs):
+            message_polls.append(True)
+            if len(message_polls) == 1:
+                return [{"seq": 7, "deliveryMode": "live", "chatId": "123@lid", "messageId": "recovery-probe",
+                         "senderId": "123@lid", "body": "Fictional live input", "timestamp": time.time()}]
+            if len(message_polls) == 3:
+                daemon._running = False
+            return []
+
+        async def acknowledge(seq):
+            acked.append(seq)
+
+        async def dispatch(event):
+            dispatched.append(event.message_id)
+            daemon._gateway_wal.mark_processed(event.raw_message["wal_seq"])
+
+        daemon._bridge_get_json = messages
+        daemon._ack_bridge_message = acknowledge
+        daemon._dispatch_built_message_event = dispatch
+
+        async def unexpected_bridge_recovery(*_args, **_kwargs):
+            pytest.fail("Web-source archive failure must not probe or restart Baileys")
+
+        daemon._bridge_health = unexpected_bridge_recovery
+        daemon._recover_bridge_once = unexpected_bridge_recovery
+        daemon.connect = unexpected_bridge_recovery
+        real_sleep = asyncio.sleep
+        setup_ticks = []
+
+        async def setup_sleep(_delay):
+            setup_ticks.append(True)
+            if len(setup_ticks) == 2:
+                daemon._running = False
+            await real_sleep(0)
+
+        try:
+            if consumer == "poll":
+                await daemon._poll_messages()
+                assert dispatched == ["recovery-probe"]
+                assert acked == [7]
+                assert len(message_polls) == 3
+            else:
+                monkeypatch.setattr(asyncio, "sleep", setup_sleep)
+                await daemon._monitor_web_source_setup()
+                assert len(setup_ticks) == 2
+            assert failures == [failure]
+            assert restarted == []
+            assert daemon._web_source_process is None
+            assert not daemon._stop_requested.is_set()
+            assert daemon._read_web_source_status() == {"state": "degraded", "wwebjs_ready": False}
+            assert "Fictional archive I/O failure" in caplog.text
+            assert "history capture remains unavailable" in caplog.text
+            if failure == "auth_directory":
+                backups = list((daemon.home / "backups").glob("wwebjs-auth-logged-out-*/session.json"))
+                assert len(backups) == 1
+                assert backups[0].read_text() == "fictional expired auth"
+            else:
+                assert (daemon._web_source_auth_path / "session.json").read_text() == "fictional expired auth"
+        finally:
+            daemon._running = False
+            daemon._db.close()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("exit_code", [0, 1])
+def test_non_logout_web_source_exit_keeps_auth_and_does_not_restart(tmp_path, monkeypatch, exit_code):
+    daemon = make_daemon(tmp_path, monkeypatch)
+    daemon.settings.web_source_enabled = True
+    daemon._web_source_auth_path.mkdir(parents=True)
+    auth = daemon._web_source_auth_path / "session.json"
+    auth.write_text("fictional valid auth")
+    daemon._web_source_process = type("Process", (), {"poll": lambda _self: exit_code})()
+    restarted = []
+    daemon._start_web_source = lambda: restarted.append(True) or True
+    try:
+        asyncio.run(daemon._check_web_source_exit())
+        assert auth.read_text() == "fictional valid auth"
+        assert not (daemon.home / "backups").exists()
+        assert restarted == []
+        assert not daemon._stop_requested.is_set()
+    finally:
+        daemon._db.close()
+
+
 def test_turn_payload_and_respond_route(tmp_path, monkeypatch):
     async def run():
         memu = FakeMemu({"ok": True, "response": "pong", "response_target": "respond"})

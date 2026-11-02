@@ -2014,13 +2014,16 @@ class ChannelsDaemon:
                 pass
             self._close_web_source_log()
             if returncode == _WHATSAPP_LOGGED_OUT_EXIT_CODE:
-                backup_dir = self.home / "backups"
-                backup_dir.mkdir(parents=True, exist_ok=True)
-                backup = backup_dir / f"wwebjs-auth-logged-out-{datetime.now():%Y%m%dT%H%M%S%f}"
-                shutil.move(self._web_source_auth_path, backup)
-                self._web_source_auth_path.mkdir(mode=0o700, parents=True)
-                logger.warning("[whatsapp] Archived logged-out wwebjs auth at %s; pairing required", backup)
-                self._start_web_source()
+                try:
+                    backup_dir = self.home / "backups"
+                    backup_dir.mkdir(parents=True, exist_ok=True)
+                    backup = backup_dir / f"wwebjs-auth-logged-out-{datetime.now():%Y%m%dT%H%M%S%f}"
+                    shutil.move(self._web_source_auth_path, backup)
+                    self._web_source_auth_path.mkdir(mode=0o700, parents=True)
+                    logger.warning("[whatsapp] Archived logged-out wwebjs auth at %s; pairing required", backup)
+                    self._start_web_source()
+                except OSError:
+                    logger.exception("[whatsapp] Web-source recovery failed; history capture remains unavailable")
             return
         if (
             status.get("state") == "pairing"
