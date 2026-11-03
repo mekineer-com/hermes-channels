@@ -78,16 +78,22 @@ def test_normalize_history_for_memu_omits_incoming_human_role() -> None:
     ]
 
 
-def test_turn_forwards_owner_evidence_without_changing_sender_name(monkeypatch):
+@pytest.mark.parametrize("memorize", [None, False, True])
+def test_turn_forwards_owner_evidence_and_memorize_choice_without_changing_sender_name(monkeypatch, memorize):
     client = MemuHttpClient(base_url="http://memu.invalid")
     seen = []
     monkeypatch.setattr(client, "_post", lambda path, body: seen.append((path, body)) or {})
     for evidence in (None, "TestOwner"):
         client.memu_turn(conversation_id="whatsapp:dm:test", user_id="TestOwner", soul_id="TestSoul",
-                         message="hello", user_name="WhatsApp Display", source_owner_id=evidence)
+                         message="hello", user_name="WhatsApp Display", source_owner_id=evidence, memorize_chat=memorize)
     assert "source_owner_id" not in seen[0][1]
     assert seen[1][1]["source_owner_id"] == "TestOwner"
     assert all(body["user_name"] == "WhatsApp Display" for _, body in seen)
+    assert all(path == "/integration/memu/turn" for path, _ in seen)
+    if memorize is None:
+        assert all("memorize_chat" not in body for _, body in seen)
+    else:
+        assert all(body["memorize_chat"] is memorize for _, body in seen)
 
 
 def test_mark_outbound_requires_and_forwards_exact_claim_timestamp(monkeypatch):

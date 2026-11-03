@@ -1442,17 +1442,20 @@ def test_handle_turn_policy_excluded_short_circuits_before_memu_call(tmp_path, m
     asyncio.run(run())
 
 
-def test_handle_turn_policy_listen_only_disallows_public_response(tmp_path, monkeypatch):
+@pytest.mark.parametrize("policy", ["full", "listen_only"])
+@pytest.mark.parametrize("memorize", [False, True])
+def test_handle_turn_preserves_channel_reply_and_memorize_choices(tmp_path, monkeypatch, policy, memorize):
     async def run():
         (tmp_path / "memu.json").write_text(
-            json.dumps({"whatsapp": {"channels": {"123@lid": {"policy": "listen_only"}}}}),
+            json.dumps({"whatsapp": {"channels": {"123@lid": {"policy": policy, "memorize": memorize}}}}),
             encoding="utf-8",
         )
         memu = FakeMemu({"ok": True, "response": "pong", "response_target": "respond"})
         daemon = make_daemon(tmp_path, monkeypatch, memu)
         response = await daemon._handle_turn(event(), "agent:main:whatsapp:dm:123@lid")
         assert response == "pong"
-        assert memu.turn_calls[0]["allow_public_response"] is False
+        assert memu.turn_calls[0]["allow_public_response"] is (policy == "full")
+        assert memu.turn_calls[0]["memorize_chat"] is memorize
         await daemon.disconnect()
 
     asyncio.run(run())
