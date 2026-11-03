@@ -149,6 +149,9 @@ Hermes:
   turn.
 - Private/free-turn replies route to the operator self-DM. Public replies route
   to the origin chat. Outbound claims use `claimed_by="channels"`.
+- MCP's `queued_response` means the outbound queue owns delivery, not an empty
+  failed turn. Record public captions without sending inline; private captions
+  stay out of the originating chat's history. Deploy both sides together.
 - Outbound marks return the claim's exact `claimed_at`; it fences old results
   after reclaim even when the sender name is unchanged. A mark 409 is logged
   without remarking/resending and does not stop the rest of the batch. Deploy

@@ -909,6 +909,26 @@ def test_private_route_goes_to_self_dm(tmp_path, monkeypatch):
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("target", ["respond", "private"])
+@pytest.mark.parametrize("caption", ["A fictional report.", ""])
+def test_queued_attachment_is_not_an_empty_turn_or_inline_reply(tmp_path, monkeypatch, target, caption):
+    async def run():
+        memu = FakeMemu({"ok": True, "response": "", "response_target": target, "queued_response": caption})
+        daemon = make_daemon(tmp_path, monkeypatch, memu)
+        notices = []
+        daemon._route_whatsapp_notice_to_self_dm = lambda *args: notices.append(args)
+        assert await daemon._handle_turn(event(), "agent:main:whatsapp:dm:123@lid") == ""
+        assert notices == []
+        session_id = next(iter(daemon._session_entries.values())).session_id
+        rows = daemon._db.get_messages(session_id)
+        assert rows[-1]["role"] == "assistant"
+        assert rows[-1]["content"] == (caption if target == "respond" else "")
+        assert rows[-1]["sender_id"] == "soul:soul"
+        await daemon.disconnect()
+
+    asyncio.run(run())
+
+
 def test_memu_failure_does_not_duplicate_user_row(tmp_path, monkeypatch):
     async def run():
         class FailingMemu(FakeMemu):

@@ -999,20 +999,24 @@ class ChannelsDaemon:
             if response_target in {"listen", "observe"}:
                 logger.info("Soul chose response_target=%s for %s", response_target, conversation_id)
                 return ""
-            if response_target == "private" and source.platform == "whatsapp" and response_text:
+            queued_response = turn_out.get("queued_response")
+            queued = source.platform == "whatsapp" and isinstance(queued_response, str)
+            if queued:
+                response_text = queued_response if response_target == "respond" else ""
+            elif response_target == "private" and source.platform == "whatsapp" and response_text:
                 self._route_whatsapp_notice_to_self_dm(response_text, conversation_id, "PRIVATE reply")
                 self._db.append_message(
                     entry.session_id, "assistant", "",
                     sender_id=f"soul:{self.settings.soul_id}", sender_name=self.settings.soul_id,
                 )
                 return ""
-            if not response_text:
+            elif not response_text:
                 raise MemuClientError("memU turn returned empty response", response_body=json.dumps(turn_out, default=str))
             self._db.append_message(
                 entry.session_id, "assistant", response_text,
                 sender_id=f"soul:{self.settings.soul_id}", sender_name=self.settings.soul_id,
             )
-            return response_text
+            return "" if queued else response_text
         except MemuUnavailableError:
             self.owner_id = None
             logger.debug("memU unavailable; input retained as history for %s", conversation_id)
