@@ -716,6 +716,34 @@ def test_poll_requests_daemon_stop_when_bridge_recovery_fails(tmp_path, monkeypa
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("windows", [True, False])
+@pytest.mark.parametrize("matches", [True, False])
+def test_stale_child_pidfile_never_probes_windows_and_only_stops_matching_posix(tmp_path, monkeypatch, windows, matches):
+    pidfile = tmp_path / "bridge.pid"
+    pidfile.write_text("123")
+    probes, stopped = [], []
+    monkeypatch.setattr(daemon_module, "_IS_WINDOWS", windows)
+
+    def alive(pid):
+        probes.append(pid)
+        return not stopped
+
+    def cmdline(_pid):
+        assert not windows
+        return "node fictional-bridge.js --session fictional-session" if matches else "unrelated process"
+
+    monkeypatch.setattr(daemon_module, "_pid_exists", alive)
+    monkeypatch.setattr(daemon_module, "_pid_cmdline", cmdline)
+    monkeypatch.setattr(daemon_module, "_terminate_pid_tree", lambda pid, *, force: stopped.append((pid, force)))
+    monkeypatch.setattr(daemon_module.time, "sleep", lambda _seconds: None)
+    daemon_module._kill_stale_pidfile_process(
+        pidfile, markers=["fictional-bridge.js", "fictional-session"], label="bridge",
+    )
+    assert not pidfile.exists()
+    assert probes == ([] if windows else [123, 123] if matches else [123])
+    assert stopped == ([(123, False)] if not windows and matches else [])
+
+
 def test_logged_out_web_source_archives_auth_and_restarts(tmp_path, monkeypatch):
     daemon = make_daemon(tmp_path, monkeypatch)
     daemon.settings.web_source_enabled = True
@@ -736,7 +764,7 @@ def test_logged_out_web_source_archives_auth_and_restarts(tmp_path, monkeypatch)
 
 
 @pytest.mark.parametrize("consumer", ["poll", "setup"])
-@pytest.mark.parametrize("failure", ["backup_directory", "archive", "auth_directory"])
+@pytest.mark.parametrize("failure", ["backup_directory", "archive", "auth_directory", "restart_database", "restart_timestamp"])
 def test_web_source_archive_failure_keeps_live_polling_and_setup_available(tmp_path, monkeypatch, caplog, consumer, failure):
     async def run():
         daemon = make_daemon(tmp_path, monkeypatch)
@@ -753,7 +781,20 @@ def test_web_source_archive_failure_keeps_live_polling_and_setup_available(tmp_p
 
         def fail():
             failures.append(failure)
-            raise OSError("Fictional archive I/O failure")
+            if failure == "restart_timestamp":
+                return "Fictional history recovery failure"
+            error = sqlite3.OperationalError if failure == "restart_database" else OSError
+            raise error("Fictional history recovery failure")
+
+        if failure.startswith("restart_"):
+            monkeypatch.setattr(daemon._db, "get_soul_active_since", lambda _soul: fail())
+
+            def restart():
+                restarted.append(True)
+                daemon._web_source_command()
+                return True
+
+            daemon._start_web_source = restart
 
         def mkdir_or_fail(path, *args, **kwargs):
             if ((failure == "backup_directory" and path == daemon.home / "backups")
@@ -816,13 +857,13 @@ def test_web_source_archive_failure_keeps_live_polling_and_setup_available(tmp_p
                 await daemon._monitor_web_source_setup()
                 assert len(setup_ticks) == 2
             assert failures == [failure]
-            assert restarted == []
+            assert restarted == ([True] if failure.startswith("restart_") else [])
             assert daemon._web_source_process is None
             assert not daemon._stop_requested.is_set()
             assert daemon._read_web_source_status() == {"state": "degraded", "wwebjs_ready": False}
-            assert "Fictional archive I/O failure" in caplog.text
+            assert "Fictional history recovery failure" in caplog.text
             assert "history capture remains unavailable" in caplog.text
-            if failure == "auth_directory":
+            if failure in {"auth_directory", "restart_database", "restart_timestamp"}:
                 backups = list((daemon.home / "backups").glob("wwebjs-auth-logged-out-*/session.json"))
                 assert len(backups) == 1
                 assert backups[0].read_text() == "fictional expired auth"

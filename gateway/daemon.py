@@ -2026,7 +2026,7 @@ class ChannelsDaemon:
                     self._web_source_auth_path.mkdir(mode=0o700, parents=True)
                     logger.warning("[whatsapp] Archived logged-out wwebjs auth at %s; pairing required", backup)
                     self._start_web_source()
-                except OSError:
+                except (OSError, sqlite3.Error, ValueError):
                     logger.exception("[whatsapp] Web-source recovery failed; history capture remains unavailable")
             return
         if (
@@ -2178,7 +2178,7 @@ def _kill_stale_pidfile_process(pid_file: Path, *, markers: list[str], label: st
     pid = _read_pidfile(pid_file)
     if pid is None:
         return
-    if _pid_exists(pid):
+    if not _IS_WINDOWS and _pid_exists(pid):
         cmdline = _pid_cmdline(pid)
         if _cmdline_contains_all(cmdline, markers):
             try:
